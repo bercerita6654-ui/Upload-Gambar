@@ -1,0 +1,6 @@
+{
+  "name": "Google Drive Image Uploader",
+  "description": "Aplikasi upload gambar PNG 5-digit otomatis ke folder Google Drive AIO dan Story Product dengan deteksi file duplikat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
