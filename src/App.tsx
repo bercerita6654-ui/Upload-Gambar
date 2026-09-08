@@ -659,6 +659,7 @@ export default function App() {
           fetchFolderContent('story', token);
         }}
         onShowToast={showToast}
+        activeCategory={selectedCategory}
       />
 
       {/* Main Container */}

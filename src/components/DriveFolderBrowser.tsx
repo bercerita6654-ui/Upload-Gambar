@@ -92,6 +92,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
             variant="browser"
             onSyncCompleted={onRefresh}
             onShowToast={onShowToast}
+            activeCategory={category}
           />
 
           <button

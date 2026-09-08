@@ -2,6 +2,7 @@ import React from 'react';
 import { User } from 'firebase/auth';
 import { Cloud, CheckCircle2, LogOut, HardDrive, AlertCircle } from 'lucide-react';
 import { SyncDriveButton } from './SyncDriveButton';
+import { FolderCategory } from '../types';
 
 interface HeaderProps {
   user: User | null;
@@ -11,6 +12,7 @@ interface HeaderProps {
   onLogout: () => void;
   onSyncCompleted?: () => void;
   onShowToast?: (type: 'success' | 'error' | 'info', title: string, message: string) => void;
+  activeCategory?: FolderCategory;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -21,6 +23,7 @@ export const Header: React.FC<HeaderProps> = ({
   onLogout,
   onSyncCompleted,
   onShowToast,
+  activeCategory,
 }) => {
   const isAuthenticated = !!user && !!token;
 
@@ -53,6 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
           <SyncDriveButton
             onSyncCompleted={onSyncCompleted}
             onShowToast={onShowToast}
+            activeCategory={activeCategory}
             variant="header"
           />
 
