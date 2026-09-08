@@ -52,7 +52,7 @@ export const SPREADSHEET_CONFIG = {
 };
 
 export const APPS_SCRIPT_SYNC_URL =
-  'https://script.google.com/macros/s/AKfycbz-ozpv3Tb5pnu2QEHTjjjxHMe6_QGP4n4Rr7-KjOwWC81vR_XaYMC1JinAZ16PJEetIQ/exec';
+  'https://script.google.com/macros/s/AKfycbzjPVi5VEr3RU1Ixs7LwAFKiX9hUYlphq0V9k3WIacJjxa7cJvhIVHRwop-cofQmjUE4Q/exec';
 
 /**
  * Validates whether the filename adheres to:

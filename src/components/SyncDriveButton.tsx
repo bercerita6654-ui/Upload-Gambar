@@ -41,15 +41,15 @@ export const APPS_SCRIPT_FULL_CODE = `/**
  * SKU diambil dari: Kolom A (Index 0)
  */
 
-var SPREADSHEET_ID = "1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos";
-var SHEET_NAME = "STOCK LIST";
+var TARGET_SPREADSHEET_ID = "1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos";
+var TARGET_SHEET_NAME = "STOCK LIST";
 
 /**
  * Helper untuk mengambil object Spreadsheet secara aman
  */
 function getTargetSpreadsheet() {
   try {
-    return SpreadsheetApp.openById(SPREADSHEET_ID);
+    return SpreadsheetApp.openById(TARGET_SPREADSHEET_ID);
   } catch (e) {
     return SpreadsheetApp.getActiveSpreadsheet();
   }
@@ -75,13 +75,13 @@ function onOpen() {
 function doGet(e) {
   try {
     var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : 'all';
-    var sheetName = (e && e.parameter && e.parameter.sheet) ? e.parameter.sheet : SHEET_NAME;
+    var sheetName = (e && e.parameter && e.parameter.sheet) ? e.parameter.sheet : TARGET_SHEET_NAME;
     
     var ss = getTargetSpreadsheet();
     if (!ss) {
       return ContentService.createTextOutput(JSON.stringify({
         status: 'error',
-        message: 'Spreadsheet dengan ID ' + SPREADSHEET_ID + ' tidak dapat dibuka.'
+        message: 'Spreadsheet dengan ID ' + TARGET_SPREADSHEET_ID + ' tidak dapat dibuka.'
       })).setMimeType(ContentService.MimeType.JSON);
     }
 
@@ -148,14 +148,14 @@ function sinkronisasiFotoProduk() {
  */
 function sinkronisasiSemua() {
   var ss = getTargetSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
+  var sheet = ss.getSheetByName(TARGET_SHEET_NAME) || ss.getActiveSheet();
   var resStory = jalankanLogikaSync(sheet, '1A4MpcBh6t60ys0KVvLjdr5F3J0Im3U_E', 22, 'GAMBAR STORY (Kolom V & W)');
   var resAio = jalankanLogikaSync(sheet, '1xYDYQfYIvFK8AxzfEFchdPg7wv58zfyI', 24, 'FOTO PRODUK (Kolom X & Y)');
   
-  var reportMessage = '📊 LAPORAN SINKRONISASI LENGKAP:\\n\\n' +
-                      '• Spreadsheet: "' + ss.getName() + '"\\n' +
-                      '• Tab Sheet: "' + sheet.getName() + '"\\n' +
-                      '• Gambar Story: ' + resStory.matchCount + ' baris disinkron (dari ' + resStory.totalFiles + ' file Drive)\\n' +
+  var reportMessage = '📊 LAPORAN SINKRONISASI LENGKAP:\n\n' +
+                      '• Spreadsheet: "' + ss.getName() + '"\n' +
+                      '• Tab Sheet: "' + sheet.getName() + '"\n' +
+                      '• Gambar Story: ' + resStory.matchCount + ' baris disinkron (dari ' + resStory.totalFiles + ' file Drive)\n' +
                       '• Foto Produk: ' + resAio.matchCount + ' baris disinkron (dari ' + resAio.totalFiles + ' file Drive)';
   SpreadsheetApp.getUi().alert(reportMessage);
 }
@@ -165,7 +165,7 @@ function sinkronisasiSemua() {
  */
 function prosesSinkronisasiDrive(folderId, startCol, namaLaporan) {
   var ss = getTargetSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
+  var sheet = ss.getSheetByName(TARGET_SHEET_NAME) || ss.getActiveSheet();
   var res = jalankanLogikaSync(sheet, folderId, startCol, namaLaporan);
   
   if (res.error) {
@@ -687,23 +687,23 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
 
             {/* Modal Body */}
             <div className="p-5 overflow-y-auto space-y-4 text-xs text-slate-600">
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 space-y-1.5 text-blue-950">
-                <p className="font-bold text-blue-900 flex items-center gap-1.5">
-                  <HelpCircle className="w-4 h-4 text-blue-600" />
-                  Mengapa Apps Script sebelumnya tidak merespon?
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 space-y-1.5 text-amber-950">
+                <p className="font-bold text-amber-900 flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 text-amber-600" />
+                  Catatan Error Apps Script Terbaru:
                 </p>
                 <p className="text-[11px] leading-relaxed">
-                  Pada URL Web App sebelumnya, Google Apps Script menghasilkan error:{' '}
-                  <code className="bg-red-50 text-red-700 px-1 py-0.5 rounded font-mono">
-                    Script function not found: doGet
+                  Pada URL Apps Script yang Anda kirimkan, server Google melaporkan error:{' '}
+                  <code className="bg-red-100 text-red-700 px-1 py-0.5 rounded font-mono font-semibold">
+                    SyntaxError: Identifier 'SPREADSHEET_ID' has already been declared (file: Update)
                   </code>
-                  . Hal ini terjadi karena di Google Apps Script, setiap kali kode diubah, Anda perlu
-                  membuat <strong>New version</strong> di menu <strong>Manage Deployments</strong>.
-                  Selain itu, kode di bawah telah disematkan ID Spreadsheet Anda{' '}
-                  <code className="bg-blue-100 px-1 py-0.5 rounded">
-                    1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos
-                  </code>{' '}
-                  sehingga dijamin membuka file yang tepat!
+                  .
+                </p>
+                <p className="text-[11px] leading-relaxed text-amber-900">
+                  <strong>Penyebab:</strong> Di editor Google Apps Script Anda terdapat lebih dari 1 file (misalnya file <code>Update.gs</code> dan <code>Code.gs</code>) yang sama-sama mendeklarasikan variabel <code>SPREADSHEET_ID</code>. Di Google Apps Script, semua file saling berbagi namespace global.
+                </p>
+                <p className="text-[11px] leading-relaxed font-medium text-emerald-800">
+                  💡 <strong>Solusi:</strong> Hapus file duplikat (seperti file <code>Update.gs</code> lama) di editor Apps Script, atau ganti isi file dengan kode tunggal di bawah ini, lalu klik <strong>Deploy &gt; Manage deployments &gt; Edit &gt; New version &gt; Deploy</strong>!
                 </p>
               </div>
 

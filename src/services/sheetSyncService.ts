@@ -38,16 +38,16 @@ export function formatSyncTimestamp(dateStr?: string): string {
 
 /**
  * Normalizes SKU and base filename for foolproof matching:
- * Handles leading zeros, trimmed spaces, lowercase, etc.
+ * Handles any extension (.png, .jpg, etc.), leading zeros, trimmed spaces, lowercase, etc.
  */
 function cleanSkuKey(raw: unknown): string {
   if (raw === null || raw === undefined) return '';
   let str = String(raw).trim().toLowerCase();
-  // Strip .png extension if present
-  if (str.endsWith('.png')) {
-    str = str.slice(0, -4);
+  const lastDot = str.lastIndexOf('.');
+  if (lastDot > 0 && lastDot >= str.length - 5) {
+    str = str.substring(0, lastDot);
   }
-  return str;
+  return str.trim();
 }
 
 /**
@@ -205,7 +205,14 @@ export async function executeDirectSpreadsheetSync(
 
     // Story match
     if (mode === 'story' || mode === 'all') {
-      const match = skuKey ? storyFileMap[skuKey] : null;
+      const num = parseInt(skuKey, 10);
+      const match = skuKey
+        ? (storyFileMap[skuKey] ||
+            (!isNaN(num)
+              ? storyFileMap[num.toString()] || storyFileMap[num.toString().padStart(5, '0')]
+              : null))
+        : null;
+
       if (match) {
         storyUpdates.push([match.id, formatSyncTimestamp(match.createdTime)]);
         storyMatchCount++;
@@ -217,7 +224,14 @@ export async function executeDirectSpreadsheetSync(
 
     // AIO / Foto Produk match
     if (mode === 'aio' || mode === 'all') {
-      const match = skuKey ? aioFileMap[skuKey] : null;
+      const num = parseInt(skuKey, 10);
+      const match = skuKey
+        ? (aioFileMap[skuKey] ||
+            (!isNaN(num)
+              ? aioFileMap[num.toString()] || aioFileMap[num.toString().padStart(5, '0')]
+              : null))
+        : null;
+
       if (match) {
         aioUpdates.push([match.id, formatSyncTimestamp(match.createdTime)]);
         aioMatchCount++;
