@@ -1,5 +1,28 @@
 import { TARGET_FOLDERS, SPREADSHEET_CONFIG, APPS_SCRIPT_SYNC_URL } from '../config/driveConfig';
 
+export type DiagnosticCategory =
+  | 'KREDENSIAL_AKSES'
+  | 'STRUKTUR_SHEET'
+  | 'KODE_APPS_SCRIPT'
+  | 'ENDPOINT_URL'
+  | 'BERHASIL'
+  | 'UNKNOWN';
+
+export interface AppsScriptDiagnostic {
+  success: boolean;
+  httpStatus: number;
+  category: DiagnosticCategory;
+  categoryLabel: string;
+  title: string;
+  detail: string;
+  rawResponse?: string;
+  suggestedFix: string[];
+  responseTimeMs?: number;
+  url: string;
+  timestamp: string;
+  parsedJson?: any;
+}
+
 export interface SyncDriveResult {
   success: boolean;
   mode: 'all' | 'story' | 'aio';
@@ -12,6 +35,156 @@ export interface SyncDriveResult {
   message: string;
   error?: string;
   appsScriptNotified: boolean;
+  appsScriptDiagnostic?: AppsScriptDiagnostic;
+  errorDiagnostic?: {
+    category: DiagnosticCategory;
+    categoryLabel: string;
+    title: string;
+    detail: string;
+    rawError?: string;
+    suggestedFix: string[];
+  };
+}
+
+/**
+ * Panggil endpoint Google Apps Script melalui proxy server untuk mendapatkan
+ * log diagnostik lengkap yang menganalisis apakah error berasal dari
+ * Kredensial, Struktur Sheet, atau Kode Apps Script.
+ */
+export async function callAppsScriptWithDiagnostics(
+  action: 'all' | 'story' | 'aio' = 'all',
+  sheet: string = SPREADSHEET_CONFIG.sheetName,
+  customUrl?: string
+): Promise<AppsScriptDiagnostic> {
+  const url = customUrl || APPS_SCRIPT_SYNC_URL;
+  try {
+    const response = await fetch('/api/sync/call-appsscript', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url,
+        action,
+        sheet,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        httpStatus: response.status,
+        category: 'ENDPOINT_URL',
+        categoryLabel: 'Gagal Menghubungi Proxy Server',
+        title: 'Proxy Server Mengembalikan Error',
+        detail: err?.detail || `HTTP ${response.status}: Tidak dapat menghubungi endpoint Apps Script.`,
+        suggestedFix: [
+          'Periksa koneksi jaringan dan apakah server berjalan dengan benar.',
+          'Pastikan URL Web App Apps Script valid.',
+        ],
+        url,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    const data: AppsScriptDiagnostic = await response.json();
+    return data;
+  } catch (err: any) {
+    return {
+      success: false,
+      httpStatus: 0,
+      category: 'ENDPOINT_URL',
+      categoryLabel: 'Koneksi Terputus / Jaringan',
+      title: 'Tidak Dapat Terhubung ke Endpoint',
+      detail: err?.message || 'Gagal mengirim permintaan ke Apps Script.',
+      suggestedFix: [
+        'Pastikan koneksi internet stabil.',
+        'Coba refresh halaman atau ulangi proses sinkronisasi.',
+      ],
+      url,
+      timestamp: new Date().toISOString(),
+    };
+  }
+}
+
+/**
+ * Menganalisis error langsung dari Google Sheets API / Drive API
+ * untuk membedakan antara masalah Kredensial vs Struktur Sheet.
+ */
+export function diagnoseDirectSyncError(err: unknown): {
+  category: DiagnosticCategory;
+  categoryLabel: string;
+  title: string;
+  detail: string;
+  rawError?: string;
+  suggestedFix: string[];
+} {
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const lower = msg.toLowerCase();
+
+  if (
+    lower.includes('insufficient authentication scopes') ||
+    lower.includes('401') ||
+    lower.includes('403') ||
+    lower.includes('unauthorized') ||
+    lower.includes('permission') ||
+    lower.includes('token')
+  ) {
+    return {
+      category: 'KREDENSIAL_AKSES',
+      categoryLabel: 'Masalah Kredensial / Otorisasi Google',
+      title: 'Izin Akun Google Belum Lengkap / Kedaluwarsa',
+      detail:
+        msg ||
+        'Token akun Google Anda tidak memiliki izin akses ke Google Sheets atau Google Drive.',
+      rawError: msg,
+      suggestedFix: [
+        'Klik tombol "Keluar" (Sign Out) di pojok kanan atas aplikasi.',
+        'Login kembali menggunakan akun Google Anda.',
+        'Saat halaman persetujuan izin Google muncul, pastikan Anda MENCENTANG semua kotak izin (Drive & Sheets).',
+        'Pastikan akun Google Anda berstatus Editor pada spreadsheet 1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos.',
+      ],
+    };
+  }
+
+  if (
+    lower.includes('unable to parse range') ||
+    lower.includes('tidak ditemukan') ||
+    lower.includes('sheet') ||
+    lower.includes('baris data') ||
+    lower.includes('404') ||
+    lower.includes('not found') ||
+    lower.includes('kolom')
+  ) {
+    return {
+      category: 'STRUKTUR_SHEET',
+      categoryLabel: 'Masalah Struktur Sheet / Tab',
+      title: 'Struktur Tab Sheet atau Spreadsheet Tidak Cocok',
+      detail:
+        msg ||
+        `Tab sheet '${SPREADSHEET_CONFIG.sheetName}' tidak ditemukan atau tidak memiliki baris SKU.`,
+      rawError: msg,
+      suggestedFix: [
+        `Buka spreadsheet target: https://docs.google.com/spreadsheets/d/${SPREADSHEET_CONFIG.spreadsheetId}`,
+        `Pastikan ada tab yang dinamai persis "${SPREADSHEET_CONFIG.sheetName}" (perhatikan spasi dan huruf besar).`,
+        'Pastikan Kolom A baris ke-1 adalah Judul Kolom, dan baris ke-2 dst berisi kode SKU (misal: 19163, 07945).',
+        'Pastikan spreadsheet memiliki minimal kolom A sampai Y (25 kolom).',
+      ],
+    };
+  }
+
+  return {
+    category: 'UNKNOWN',
+    categoryLabel: 'Kendala Sinkronisasi',
+    title: 'Gagal Menjalankan Sinkronisasi',
+    detail: msg || 'Terjadi kesalahan yang tidak terduga saat menyinkronkan data.',
+    rawError: msg,
+    suggestedFix: [
+      'Periksa kembali koneksi internet Anda.',
+      'Coba ulangi sinkronisasi dalam beberapa saat.',
+    ],
+  };
 }
 
 interface SimpleFileInfo {
@@ -291,14 +464,15 @@ export async function executeDirectSpreadsheetSync(
     }
   }
 
-  // 4. Also trigger Google Apps Script Web App in background
+  // 4. Also trigger and diagnose Google Apps Script Web App endpoint
   let appsScriptNotified = false;
+  let appsScriptDiagnostic: AppsScriptDiagnostic | undefined;
   try {
-    const pingUrl = `${APPS_SCRIPT_SYNC_URL}?action=${mode}&sheet=${encodeURIComponent(sheetName)}`;
-    fetch(pingUrl, { method: 'GET', mode: 'no-cors', cache: 'no-cache' }).catch(() => {});
-    appsScriptNotified = true;
-  } catch {
-    // optional trigger
+    if (onProgress) onProgress('Memverifikasi endpoint Apps Script...', 95);
+    appsScriptDiagnostic = await callAppsScriptWithDiagnostics(mode, sheetName);
+    appsScriptNotified = appsScriptDiagnostic.success;
+  } catch (err) {
+    console.warn('Apps Script diagnostic ping warning:', err);
   }
 
   if (onProgress) onProgress('Sinkronisasi selesai!', 100);
@@ -313,6 +487,7 @@ export async function executeDirectSpreadsheetSync(
     totalStoryFiles: storyFiles.length,
     totalAioFiles: aioFiles.length,
     appsScriptNotified,
+    appsScriptDiagnostic,
     message: `Berhasil sinkron ke Sheet '${sheetName}' (${spreadsheetId})!`,
   };
 }
