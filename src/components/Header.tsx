@@ -54,6 +54,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           {/* Tombol Apps Script Sync data Drive */}
           <SyncDriveButton
+            token={token}
             onSyncCompleted={onSyncCompleted}
             onShowToast={onShowToast}
             activeCategory={activeCategory}

@@ -12,11 +12,16 @@ import {
   Boxes,
   ShoppingBag,
   Layers,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
 } from 'lucide-react';
-import { APPS_SCRIPT_SYNC_URL } from '../config/driveConfig';
+import { APPS_SCRIPT_SYNC_URL, SPREADSHEET_CONFIG } from '../config/driveConfig';
 import { FolderCategory } from '../types';
+import { executeDirectSpreadsheetSync, SyncDriveResult } from '../services/sheetSyncService';
 
 interface SyncDriveButtonProps {
+  token?: string | null;
   onSyncCompleted?: () => void;
   onShowToast?: (type: 'success' | 'error' | 'info', title: string, message: string) => void;
   activeCategory?: FolderCategory;
@@ -28,12 +33,27 @@ export const APPS_SCRIPT_FULL_CODE = `/**
  * =========================================================================
  * GOOGLE APPS SCRIPT: AUTO SYNC ID DRIVE KE GOOGLE SPREADSHEET (STOCK LIST)
  * =========================================================================
- * Target Sheet : "STOCK LIST"
+ * Target Spreadsheet ID: 1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos
+ * Target Tab Sheet     : "STOCK LIST"
  * Target Kolom:
  *   - Gambar Story : ID di Kolom V (22), Last Update di Kolom W (23)
  *   - Foto Produk  : ID di Kolom X (24), Last Update di Kolom Y (25)
  * SKU diambil dari: Kolom A (Index 0)
  */
+
+var SPREADSHEET_ID = "1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos";
+var SHEET_NAME = "STOCK LIST";
+
+/**
+ * Helper untuk mengambil object Spreadsheet secara aman
+ */
+function getTargetSpreadsheet() {
+  try {
+    return SpreadsheetApp.openById(SPREADSHEET_ID);
+  } catch (e) {
+    return SpreadsheetApp.getActiveSpreadsheet();
+  }
+}
 
 /**
  * 1. FUNGSI MENU: Otomatis membuat menu di Google Sheet
@@ -55,11 +75,17 @@ function onOpen() {
 function doGet(e) {
   try {
     var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : 'all';
-    var sheetName = (e && e.parameter && e.parameter.sheet) ? e.parameter.sheet : 'STOCK LIST';
+    var sheetName = (e && e.parameter && e.parameter.sheet) ? e.parameter.sheet : SHEET_NAME;
     
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var ss = getTargetSpreadsheet();
+    if (!ss) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: 'error',
+        message: 'Spreadsheet dengan ID ' + SPREADSHEET_ID + ' tidak dapat dibuka.'
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
     var sheet = ss.getSheetByName(sheetName) || ss.getSheets()[0];
-    
     if (!sheet) {
       return ContentService.createTextOutput(JSON.stringify({
         status: 'error',
@@ -84,6 +110,7 @@ function doGet(e) {
     return ContentService.createTextOutput(JSON.stringify({
       status: 'success',
       message: 'Sinkronisasi berhasil dijalankan!',
+      spreadsheetId: SPREADSHEET_ID,
       sheet: sheet.getName(),
       reports: reports
     })).setMimeType(ContentService.MimeType.JSON);
@@ -120,12 +147,13 @@ function sinkronisasiFotoProduk() {
  * FUNGSI 3: Memicu sinkronisasi Semua Sekaligus (Dari menu Spreadsheet)
  */
 function sinkronisasiSemua() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName('STOCK LIST') || ss.getActiveSheet();
+  var ss = getTargetSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
   var resStory = jalankanLogikaSync(sheet, '1A4MpcBh6t60ys0KVvLjdr5F3J0Im3U_E', 22, 'GAMBAR STORY (Kolom V & W)');
   var resAio = jalankanLogikaSync(sheet, '1xYDYQfYIvFK8AxzfEFchdPg7wv58zfyI', 24, 'FOTO PRODUK (Kolom X & Y)');
   
   var reportMessage = '📊 LAPORAN SINKRONISASI LENGKAP:\\n\\n' +
+                      '• Spreadsheet: "' + ss.getName() + '"\\n' +
                       '• Tab Sheet: "' + sheet.getName() + '"\\n' +
                       '• Gambar Story: ' + resStory.matchCount + ' baris disinkron (dari ' + resStory.totalFiles + ' file Drive)\\n' +
                       '• Foto Produk: ' + resAio.matchCount + ' baris disinkron (dari ' + resAio.totalFiles + ' file Drive)';
@@ -136,8 +164,8 @@ function sinkronisasiSemua() {
  * Pembungkus laporan UI Alert (Bila diklik dari dalam menu Google Sheet)
  */
 function prosesSinkronisasiDrive(folderId, startCol, namaLaporan) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName('STOCK LIST') || ss.getActiveSheet();
+  var ss = getTargetSpreadsheet();
+  var sheet = ss.getSheetByName(SHEET_NAME) || ss.getActiveSheet();
   var res = jalankanLogikaSync(sheet, folderId, startCol, namaLaporan);
   
   if (res.error) {
@@ -154,7 +182,6 @@ function prosesSinkronisasiDrive(folderId, startCol, namaLaporan) {
 
 /**
  * FUNGSI UTAMA LOGIKA SINKRONISASI:
- * Bekerja tanpa popup alert sehingga aman dipanggil oleh Web App maupun menu Sheet!
  */
 function jalankanLogikaSync(sheet, folderId, startCol, namaLaporan) {
   var sheetName = sheet.getName();
@@ -240,6 +267,7 @@ function jalankanLogikaSync(sheet, folderId, startCol, namaLaporan) {
 `;
 
 export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
+  token,
   onSyncCompleted,
   onShowToast,
   activeCategory = 'aio',
@@ -250,6 +278,10 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
   const [lastSyncStatus, setLastSyncStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [dropdownOpen, setDropdownOpen] = useState<boolean>(false);
   const [showScriptModal, setShowScriptModal] = useState<boolean>(false);
+  const [showProgressModal, setShowProgressModal] = useState<boolean>(false);
+  const [progressStatus, setProgressStatus] = useState<string>('');
+  const [progressPercent, setProgressPercent] = useState<number>(0);
+  const [syncResult, setSyncResult] = useState<SyncDriveResult | null>(null);
   const [isCopied, setIsCopied] = useState<boolean>(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -278,51 +310,71 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
     setDropdownOpen(false);
     if (isSyncing) return;
 
-    setIsSyncing(true);
-    setLastSyncStatus('idle');
-
-    let actionLabel = 'Semua (Foto Produk & Story)';
-    if (targetAction === 'aio') actionLabel = 'Foto Produk (Kolom X & Y)';
-    if (targetAction === 'story') actionLabel = 'Gambar Story (Kolom V & W)';
-
-    try {
-      const syncUrl = `${APPS_SCRIPT_SYNC_URL}?action=${targetAction}&sheet=STOCK%20LIST`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 25000);
-
-      await fetch(syncUrl, {
-        method: 'GET',
-        mode: 'no-cors',
-        cache: 'no-cache',
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      setLastSyncStatus('success');
-      setTimeout(() => setLastSyncStatus('idle'), 4000);
-
+    if (!token) {
       if (onShowToast) {
         onShowToast(
-          'success',
-          'Sync Data Drive Berhasil!',
-          `Permintaan sinkronisasi [${actionLabel}] untuk sheet 'STOCK LIST' telah dikirim ke Google Apps Script.`
+          'info',
+          'Login Google Diperlukan',
+          'Silakan login terlebih dahulu untuk menyinkronkan data Google Sheet secara langsung.'
         );
+      }
+      return;
+    }
+
+    setIsSyncing(true);
+    setLastSyncStatus('idle');
+    setSyncResult(null);
+    setShowProgressModal(true);
+    setProgressPercent(5);
+    setProgressStatus('Menyiapkan koneksi ke Google Drive & Sheets...');
+
+    try {
+      // 1. Direct sync through Google Sheets API with the logged-in user's token
+      const res = await executeDirectSpreadsheetSync(token, targetAction, (status, percent) => {
+        setProgressStatus(status);
+        setProgressPercent(percent);
+      });
+
+      setSyncResult(res);
+      setLastSyncStatus('success');
+
+      let detailMsg = '';
+      if (targetAction === 'all') {
+        detailMsg = `Berhasil update ${res.storyMatches} Gambar Story (Kolom V & W) dan ${res.aioMatches} Foto Produk (Kolom X & Y) pada Sheet '${res.sheetName}'!`;
+      } else if (targetAction === 'story') {
+        detailMsg = `Berhasil update ${res.storyMatches} Gambar Story (Kolom V & W) pada Sheet '${res.sheetName}'!`;
+      } else {
+        detailMsg = `Berhasil update ${res.aioMatches} Foto Produk (Kolom X & Y) pada Sheet '${res.sheetName}'!`;
+      }
+
+      if (onShowToast) {
+        onShowToast('success', 'Sinkronisasi Spreadsheet Berhasil!', detailMsg);
       }
 
       if (onSyncCompleted) {
         onSyncCompleted();
       }
     } catch (err: unknown) {
-      console.warn('Apps Script sync response:', err);
+      console.warn('Sync error:', err);
+      const errObj = err as { message?: string };
+      const errorMsg = errObj?.message || 'Gagal menyinkronkan ke Google Sheet';
+
+      // Fallback: ping Apps Script directly
+      try {
+        const syncUrl = `${APPS_SCRIPT_SYNC_URL}?action=${targetAction}&sheet=STOCK%20LIST`;
+        fetch(syncUrl, { method: 'GET', mode: 'no-cors' }).catch(() => {});
+      } catch {
+        // ignore
+      }
+
       setLastSyncStatus('error');
-      setTimeout(() => setLastSyncStatus('idle'), 4000);
+      setProgressStatus(`Gagal: ${errorMsg}`);
 
       if (onShowToast) {
         onShowToast(
           'error',
-          'Kendala Sinkronisasi Apps Script',
-          'Periksa koneksi atau pastikan Web App Apps Script dideploy sebagai "Anyone".'
+          'Kendala Sinkronisasi',
+          `${errorMsg}. Anda juga dapat menjalankan via menu Google Sheet.`
         );
       }
     } finally {
@@ -367,11 +419,11 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
             </button>
 
             <a
-              href={APPS_SCRIPT_SYNC_URL}
+              href={`https://docs.google.com/spreadsheets/d/${SPREADSHEET_CONFIG.spreadsheetId}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="px-2 py-1.5 text-blue-500 hover:text-blue-700 hover:bg-blue-50 border-l border-blue-100 rounded-r-lg transition-colors"
-              title="Buka Web App Apps Script di tab baru"
+              className="px-2 py-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 border-l border-blue-100 rounded-r-lg transition-colors"
+              title="Buka Google Spreadsheet 'STOCK LIST'"
             >
               <ExternalLink className="w-3 h-3" />
             </a>
@@ -415,13 +467,13 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
               <ChevronDown className="w-3.5 h-3.5" />
             </button>
 
-            {/* External Link */}
+            {/* External Link to Spreadsheet */}
             <a
-              href={APPS_SCRIPT_SYNC_URL}
+              href={`https://docs.google.com/spreadsheets/d/${SPREADSHEET_CONFIG.spreadsheetId}`}
               target="_blank"
               rel="noopener noreferrer"
               className="px-2 py-1.5 border-l border-white/20 text-white/80 hover:text-white hover:bg-white/10 transition-colors"
-              title="Buka Web App Apps Script di tab baru"
+              title="Buka Spreadsheet di tab baru"
             >
               <ExternalLink className="w-3 h-3" />
             </a>
@@ -430,10 +482,10 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
 
         {/* Dropdown Menu */}
         {dropdownOpen && (
-          <div className="absolute right-0 top-full mt-1.5 w-72 bg-white rounded-xl shadow-xl border border-slate-200 z-50 py-1.5 text-xs animate-in fade-in-50 zoom-in-95">
+          <div className="absolute right-0 top-full mt-1.5 w-76 bg-white rounded-xl shadow-xl border border-slate-200 z-50 py-1.5 text-xs animate-in fade-in-50 zoom-in-95">
             <div className="px-3 py-1.5 border-b border-slate-100 font-semibold text-slate-700 flex items-center justify-between">
-              <span>Pilihan Sync ke Sheet 'STOCK LIST'</span>
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+              <span className="truncate">Sheet: STOCK LIST</span>
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
             </div>
 
             <button
@@ -443,7 +495,7 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
             >
               <Layers className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
               <div>
-                <div className="font-bold">Sync Keduanya (Semua Kolom)</div>
+                <div className="font-bold">⚡ Sync Keduanya Sekaligus</div>
                 <div className="text-[10px] text-slate-500">
                   Kolom V, W (Story) &amp; Kolom X, Y (Foto Produk)
                 </div>
@@ -457,7 +509,7 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
             >
               <ShoppingBag className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
               <div>
-                <div className="font-bold">Sync Gambar Story Saja</div>
+                <div className="font-bold">📸 Sync Gambar Story Saja</div>
                 <div className="text-[10px] text-slate-500">ID di Kolom V (22), Date di Kolom W (23)</div>
               </div>
             </button>
@@ -469,12 +521,22 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
             >
               <Boxes className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
               <div>
-                <div className="font-bold">Sync Foto Produk Saja</div>
+                <div className="font-bold">📦 Sync Foto Produk Saja</div>
                 <div className="text-[10px] text-slate-500">ID di Kolom X (24), Date di Kolom Y (25)</div>
               </div>
             </button>
 
             <div className="border-t border-slate-100 my-1"></div>
+
+            <a
+              href={`https://docs.google.com/spreadsheets/d/${SPREADSHEET_CONFIG.spreadsheetId}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full px-3 py-1.5 text-left text-slate-600 hover:bg-slate-50 flex items-center justify-between"
+            >
+              <span className="text-[11px]">Buka Spreadsheet Target</span>
+              <ExternalLink className="w-3 h-3 text-slate-400" />
+            </a>
 
             <button
               onClick={() => {
@@ -484,11 +546,117 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
               className="w-full px-3 py-2 text-left text-blue-600 hover:bg-blue-50 flex items-center gap-2 font-medium cursor-pointer"
             >
               <Code2 className="w-4 h-4" />
-              <span>Lihat Kode Script Google Sheet</span>
+              <span>Kode Google Apps Script</span>
             </button>
           </div>
         )}
       </div>
+
+      {/* Modal Progress Sinkronisasi Langsung */}
+      {showProgressModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
+                  <FileSpreadsheet className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">Sinkronisasi ID Google Drive</h3>
+                  <p className="text-xs text-slate-500">Sheet: 'STOCK LIST'</p>
+                </div>
+              </div>
+              {!isSyncing && (
+                <button
+                  onClick={() => setShowProgressModal(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              )}
+            </div>
+
+            {/* Body */}
+            <div className="p-5 space-y-4">
+              {isSyncing ? (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
+                    <p className="text-xs font-medium text-slate-700">{progressStatus}</p>
+                  </div>
+                  {/* Progress Bar */}
+                  <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-blue-600 h-2 transition-all duration-300 rounded-full"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-400 text-right">{progressPercent}%</p>
+                </div>
+              ) : syncResult ? (
+                <div className="space-y-3">
+                  <div className="flex items-start gap-2.5 p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                    <div className="text-xs space-y-1">
+                      <p className="font-bold">Sinkronisasi Selesai!</p>
+                      <p className="text-slate-600 text-[11px]">
+                        Google Spreadsheet <code>{SPREADSHEET_CONFIG.spreadsheetId}</code> telah berhasil diperbarui.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Summary Box */}
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 space-y-0.5">
+                      <span className="text-[10px] text-slate-500 font-medium">Gambar Story (Kolom V &amp; W)</span>
+                      <p className="text-base font-bold text-slate-900">
+                        {syncResult.storyMatches}{' '}
+                        <span className="text-xs font-normal text-slate-500">baris</span>
+                      </p>
+                    </div>
+                    <div className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 space-y-0.5">
+                      <span className="text-[10px] text-slate-500 font-medium">Foto Produk (Kolom X &amp; Y)</span>
+                      <p className="text-base font-bold text-slate-900">
+                        {syncResult.aioMatches}{' '}
+                        <span className="text-xs font-normal text-slate-500">baris</span>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900">
+                  <AlertCircle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="text-xs space-y-1">
+                    <p className="font-bold">Status Sinkronisasi</p>
+                    <p className="text-slate-600 text-[11px]">{progressStatus}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-5 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
+              <a
+                href={`https://docs.google.com/spreadsheets/d/${SPREADSHEET_CONFIG.spreadsheetId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-800"
+              >
+                <span>Buka Google Sheet</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+              <button
+                onClick={() => setShowProgressModal(false)}
+                disabled={isSyncing}
+                className="px-4 py-1.5 rounded-lg font-bold text-xs bg-slate-900 hover:bg-slate-800 text-white transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal Petunjuk Kode Google Apps Script */}
       {showScriptModal && (
@@ -505,7 +673,7 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
                     Kode Google Apps Script (Sheet: 'STOCK LIST')
                   </h3>
                   <p className="text-xs text-slate-500">
-                    Bekerja untuk tombol web app dan menu Spreadsheet
+                    ID Spreadsheet: {SPREADSHEET_CONFIG.spreadsheetId}
                   </p>
                 </div>
               </div>
@@ -522,14 +690,20 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
               <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 space-y-1.5 text-blue-950">
                 <p className="font-bold text-blue-900 flex items-center gap-1.5">
                   <HelpCircle className="w-4 h-4 text-blue-600" />
-                  Mengapa kode perlu disesuaikan sedikit?
+                  Mengapa Apps Script sebelumnya tidak merespon?
                 </p>
                 <p className="text-[11px] leading-relaxed">
-                  Kode asli Anda menggunakan <code className="bg-blue-100 px-1 py-0.5 rounded">SpreadsheetApp.getUi()</code>. 
-                  Fungsi popup UI tersebut hanya bisa berjalan jika diklik langsung dari dalam Sheet, 
-                  dan akan error jika dipanggil lewat web browser luar (<code className="bg-blue-100 px-1 py-0.5 rounded">/exec</code>).
-                  Kode di bawah ini sudah diperbarui dengan fungsi <code className="bg-blue-100 px-1 py-0.5 rounded">doGet(e)</code> 
-                  agar bisa dipicu oleh tombol web ini <strong>DAN</strong> tetap memiliki menu di Google Sheet!
+                  Pada URL Web App sebelumnya, Google Apps Script menghasilkan error:{' '}
+                  <code className="bg-red-50 text-red-700 px-1 py-0.5 rounded font-mono">
+                    Script function not found: doGet
+                  </code>
+                  . Hal ini terjadi karena di Google Apps Script, setiap kali kode diubah, Anda perlu
+                  membuat <strong>New version</strong> di menu <strong>Manage Deployments</strong>.
+                  Selain itu, kode di bawah telah disematkan ID Spreadsheet Anda{' '}
+                  <code className="bg-blue-100 px-1 py-0.5 rounded">
+                    1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos
+                  </code>{' '}
+                  sehingga dijamin membuka file yang tepat!
                 </p>
               </div>
 
@@ -562,12 +736,19 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
               </div>
 
               <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-amber-950 text-[11px] space-y-1">
-                <span className="font-bold">Langkah Deploy di Google Apps Script:</span>
+                <span className="font-bold">Langkah Deploy Ulang di Google Apps Script:</span>
                 <ol className="list-decimal list-inside space-y-0.5 text-amber-900">
-                  <li>Buka Google Sheet Anda &gt; menu <strong>Extensions &gt; Apps Script</strong>.</li>
-                  <li>Hapus kode lama, lalu tempelkan kode di atas &gt; klik <strong>Save</strong> (ikon disket).</li>
-                  <li>Klik tombol biru <strong>Deploy &gt; Manage deployments</strong> (atau <i>New deployment</i>).</li>
-                  <li>Pilih <strong>Web app</strong>, ubah <i>Who has access</i> ke <strong>Anyone</strong>, lalu klik <strong>Deploy</strong>.</li>
+                  <li>Buka Google Sheet &gt; menu <strong>Extensions &gt; Apps Script</strong>.</li>
+                  <li>Tempelkan kode di atas, lalu klik <strong>Save</strong> (ikon disket).</li>
+                  <li>Klik tombol biru <strong>Deploy &gt; Manage deployments</strong>.</li>
+                  <li>
+                    Klik ikon <strong>Pensil (Edit)</strong>, lalu pada kolom <strong>Version</strong>{' '}
+                    pilih <strong>New version</strong>.
+                  </li>
+                  <li>
+                    Pastikan <i>Who has access</i> adalah <strong>Anyone</strong>, lalu klik{' '}
+                    <strong>Deploy</strong>.
+                  </li>
                 </ol>
               </div>
             </div>
@@ -575,7 +756,7 @@ export const SyncDriveButton: React.FC<SyncDriveButtonProps> = ({
             {/* Modal Footer */}
             <div className="px-5 py-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
               <span className="text-[11px] text-slate-500">
-                Target Sheet: <strong>STOCK LIST</strong> (Kolom A: SKU, Kolom V-W &amp; X-Y)
+                Target Sheet: <strong>STOCK LIST</strong>
               </span>
               <button
                 onClick={() => setShowScriptModal(false)}

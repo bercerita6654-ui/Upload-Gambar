@@ -16,6 +16,7 @@ interface DriveFolderBrowserProps {
   category: FolderCategory;
   files: DriveFileInfo[];
   isLoading: boolean;
+  token?: string | null;
   onRefresh: () => void;
   onShowToast?: (type: 'success' | 'error' | 'info', title: string, message: string) => void;
 }
@@ -24,6 +25,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
   category,
   files,
   isLoading,
+  token,
   onRefresh,
   onShowToast,
 }) => {
@@ -90,6 +92,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
           {/* Sync data Drive button */}
           <SyncDriveButton
             variant="browser"
+            token={token}
             onSyncCompleted={onRefresh}
             onShowToast={onShowToast}
             activeCategory={category}

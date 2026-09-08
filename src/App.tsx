@@ -774,6 +774,7 @@ export default function App() {
             category={selectedCategory}
             files={folderFiles[selectedCategory] || []}
             isLoading={isLoadingFolder}
+            token={token}
             onRefresh={() => fetchFolderContent(selectedCategory, token)}
             onShowToast={showToast}
           />

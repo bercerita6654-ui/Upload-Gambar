@@ -39,7 +39,17 @@ export const TARGET_FOLDERS: Record<FolderCategory, TargetFolderConfig> = {
   },
 };
 
-export const DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive'];
+export const DRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/spreadsheets',
+];
+
+export const SPREADSHEET_CONFIG = {
+  spreadsheetId: '1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos',
+  sheetName: 'STOCK LIST',
+  storyColStart: 22, // Kolom V (22), Last Update Kolom W (23)
+  aioColStart: 24, // Kolom X (24), Last Update Kolom Y (25)
+};
 
 export const APPS_SCRIPT_SYNC_URL =
   'https://script.google.com/macros/s/AKfycbz-ozpv3Tb5pnu2QEHTjjjxHMe6_QGP4n4Rr7-KjOwWC81vR_XaYMC1JinAZ16PJEetIQ/exec';
