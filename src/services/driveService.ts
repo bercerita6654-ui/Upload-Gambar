@@ -333,69 +333,43 @@ export async function listFolderFiles(
 }
 
 /**
- * Deletes a file from Google Drive (e.g. cleaning duplicate files).
- * Uses a multi-tiered strategy: Server proxy -> Direct hard delete -> Direct trash move.
+ * Deletes a file from Google Drive (e.g. cleaning duplicate files or removing single file).
+ * Uses the server proxy gateway with multi-tier fallback (Hard Delete -> Trash -> Remove Parents).
  */
-export async function deleteDriveFile(fileId: string, token: string): Promise<boolean> {
-  // Tier 1: Try server proxy route (bypasses browser CORS restrictions)
-  try {
-    const res = await fetch(`/api/drive/delete?fileId=${encodeURIComponent(fileId)}`, {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'x-file-id': fileId,
-      },
-    });
-
-    if (res.ok) {
-      return true;
-    }
-  } catch (proxyErr) {
-    console.warn('Server proxy delete error, attempting direct Google Drive call:', proxyErr);
+export async function deleteDriveFile(
+  fileId: string,
+  token: string,
+  folderId?: string
+): Promise<boolean> {
+  const queryParams = new URLSearchParams({ fileId });
+  if (folderId) {
+    queryParams.set('folderId', folderId);
   }
 
-  // Tier 2: Direct Google Drive API (Permanent DELETE)
-  try {
-    const directRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
-      {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    );
+  const res = await fetch(`/api/drive/delete?${queryParams.toString()}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'x-file-id': fileId,
+      ...(folderId ? { 'x-folder-id': folderId } : {}),
+    },
+  });
 
-    if (directRes.ok || directRes.status === 204) {
-      return true;
-    }
-  } catch (directErr) {
-    console.warn('Direct DELETE failed, falling back to moving to trash:', directErr);
+  // If status is 404, file is already gone, which is a success state
+  if (res.status === 404) {
+    return true;
   }
 
-  // Tier 3: Direct Google Drive API (Move to Trash)
-  // Highly reliable when permanent deletion permissions are restricted on the folder
-  try {
-    const trashRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
-      {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ trashed: true }),
-      }
-    );
+  const data = await res.json().catch(() => ({}));
 
-    if (trashRes.ok || trashRes.status === 204) {
-      return true;
-    }
-
-    const err = await trashRes.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `Gagal menghapus file dari Google Drive (${trashRes.status})`);
-  } catch (finalErr: unknown) {
-    const errObj = finalErr as { message?: string };
-    throw new Error(errObj.message || 'Gagal menghapus file dari Google Drive.');
+  if (res.ok) {
+    return true;
   }
+
+  const errorMessage =
+    data?.error?.message ||
+    data?.message ||
+    `Gagal menghapus file dari Google Drive (${res.status})`;
+
+  throw new Error(errorMessage);
 }

@@ -146,7 +146,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
 
     setIsDeletingSingle(true);
     try {
-      await deleteDriveFile(fileToDelete.id, token);
+      await deleteDriveFile(fileToDelete.id, token, targetConfig.folderId);
       onShowToast?.(
         'success',
         'File Berhasil Dihapus',
@@ -200,7 +200,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
       setBatchProgressPercent(Math.round(((i + 1) / filesToDelete.length) * 100));
 
       try {
-        await deleteDriveFile(file.id, token);
+        await deleteDriveFile(file.id, token, targetConfig.folderId);
         deletedCount++;
       } catch (err) {
         console.warn(`Failed to delete duplicate ${file.name} (${file.id}):`, err);
@@ -534,21 +534,28 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1 shrink-0">
-                  {/* Delete button if duplicate */}
-                  {isDuplicateInDrive && (
-                    <button
-                      onClick={() => handleDeleteFile(file)}
-                      disabled={isDeletingSingle && fileToDelete?.id === file.id}
-                      className="p-1.5 rounded-md text-red-600 hover:text-white hover:bg-red-600 border border-red-200 hover:border-red-600 transition-colors cursor-pointer"
-                      title="Hapus file duplikat ini dari Google Drive"
-                    >
-                      {isDeletingSingle && fileToDelete?.id === file.id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <Trash2 className="w-3.5 h-3.5" />
-                      )}
-                    </button>
-                  )}
+                  {/* Delete button (for all files, highlighted for duplicates) */}
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteFile(file)}
+                    disabled={isDeletingSingle && fileToDelete?.id === file.id}
+                    className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                      isDuplicateInDrive
+                        ? 'text-red-600 hover:text-white hover:bg-red-600 bg-red-50 border border-red-200 hover:border-red-600'
+                        : 'text-slate-400 hover:text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200'
+                    }`}
+                    title={
+                      isDuplicateInDrive
+                        ? 'Hapus file duplikat ini dari Google Drive'
+                        : 'Hapus file ini dari Google Drive'
+                    }
+                  >
+                    {isDeletingSingle && fileToDelete?.id === file.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-red-600" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                  </button>
 
                   {file.webViewLink && (
                     <a

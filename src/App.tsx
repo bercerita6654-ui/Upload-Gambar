@@ -629,11 +629,12 @@ export default function App() {
 
       // Clean up any extra duplicate copies that already exist in Drive
       let cleanedCount = 0;
+      const targetFolderConfig = TARGET_FOLDERS[targetCategory];
       if (item.existingFile?.allMatches && item.existingFile.allMatches.length > 1) {
         const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
         for (const copy of extraCopies) {
           try {
-            await deleteDriveFile(copy.id, token);
+            await deleteDriveFile(copy.id, token, targetFolderConfig?.folderId);
             cleanedCount++;
           } catch (delErr) {
             console.warn('Could not auto-clean extra duplicate copy:', delErr);
@@ -703,17 +704,18 @@ export default function App() {
 
     setIsDeletingFromModal(true);
     const targetCategory = item.category || 'aio';
+    const targetFolderConfig = TARGET_FOLDERS[targetCategory];
 
     try {
       // 1. Delete the primary existing file from Google Drive
-      await deleteDriveFile(item.existingFile.id, token);
+      await deleteDriveFile(item.existingFile.id, token, targetFolderConfig?.folderId);
 
       // 2. Also delete any extra duplicate copies in Drive if present
       if (item.existingFile.allMatches && item.existingFile.allMatches.length > 1) {
         const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
         for (const copy of extraCopies) {
           try {
-            await deleteDriveFile(copy.id, token);
+            await deleteDriveFile(copy.id, token, targetFolderConfig?.folderId);
           } catch (delErr) {
             console.warn('Could not auto-clean extra duplicate copy:', delErr);
           }

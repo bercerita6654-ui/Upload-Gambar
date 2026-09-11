@@ -16,7 +16,7 @@ export const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
 DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
 provider.setCustomParameters({
-  prompt: 'select_account',
+  prompt: 'select_account consent',
 });
 
 let isSigningIn = false;

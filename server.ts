@@ -351,20 +351,31 @@ async function startServer() {
     }
   });
 
-  // Proxy delete file from Google Drive API with automatic trash fallback
+  // Proxy delete file from Google Drive API with automatic multi-tier fallback (Hard Delete -> Trash -> Remove Parents)
   app.delete('/api/drive/delete', async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader) {
-        return res.status(401).json({ error: { message: 'Token otorisasi tidak ditemukan.' } });
+        return res.status(401).json({
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'Token otorisasi tidak ditemukan. Silakan login kembali dengan Google.',
+          },
+        });
       }
 
       const fileId = (req.headers['x-file-id'] as string) || (req.query.fileId as string);
+      const folderId = (req.headers['x-folder-id'] as string) || (req.query.folderId as string);
+
       if (!fileId) {
-        return res.status(400).json({ error: { message: 'ID file target tidak ditemukan.' } });
+        return res.status(400).json({
+          error: { code: 'INVALID_PARAM', message: 'ID file target tidak ditemukan.' },
+        });
       }
 
-      // Step 1: Attempt hard delete
+      console.log(`[DRIVE DELETE] Request deleting fileId: ${fileId}, folderId: ${folderId || 'none'}`);
+
+      // Strategy 1: Attempt hard delete (permanent deletion)
       const driveRes = await fetch(
         `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
         {
@@ -375,11 +386,34 @@ async function startServer() {
         }
       );
 
-      if (driveRes.ok || driveRes.status === 204) {
-        return res.json({ success: true, message: 'File berhasil dihapus dari Google Drive' });
+      // If file is already gone (404), treat as success
+      if (driveRes.status === 404) {
+        console.log(`[DRIVE DELETE] File ${fileId} already not found (404), considered deleted.`);
+        return res.json({
+          success: true,
+          message: 'File sudah tidak ada di Google Drive (sudah terhapus).',
+        });
       }
 
-      // Step 2: Fallback to moving to trash if hard delete is restricted
+      if (driveRes.ok || driveRes.status === 204) {
+        console.log(`[DRIVE DELETE] Hard delete succeeded for ${fileId}`);
+        return res.json({ success: true, message: 'File berhasil dihapus permanen dari Google Drive' });
+      }
+
+      const hardDeleteErr = await driveRes.json().catch(() => ({}));
+      console.warn(`[DRIVE DELETE] Hard delete returned status ${driveRes.status}:`, hardDeleteErr);
+
+      // If 401 Unauthorized, token expired
+      if (driveRes.status === 401) {
+        return res.status(401).json({
+          error: {
+            code: 'TOKEN_EXPIRED',
+            message: 'Sesi login Google telah kedaluwarsa. Silakan Logout lalu Login kembali.',
+          },
+        });
+      }
+
+      // Strategy 2: Attempt moving to trash (soft delete)
       const trashRes = await fetch(
         `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
         {
@@ -392,16 +426,120 @@ async function startServer() {
         }
       );
 
-      if (trashRes.ok || trashRes.status === 204) {
-        return res.json({ success: true, message: 'File berhasil dipindahkan ke tempat sampah Google Drive' });
+      if (trashRes.status === 404) {
+        return res.json({
+          success: true,
+          message: 'File sudah tidak ada di Google Drive (sudah terhapus).',
+        });
       }
 
-      const data = await trashRes.json().catch(() => ({}));
-      return res.status(trashRes.status).json(data);
+      if (trashRes.ok || trashRes.status === 204) {
+        console.log(`[DRIVE DELETE] Trashed succeeded for ${fileId}`);
+        return res.json({
+          success: true,
+          message: 'File berhasil dipindahkan ke tempat sampah Google Drive.',
+        });
+      }
+
+      const trashErr = await trashRes.json().catch(() => ({}));
+      console.warn(`[DRIVE DELETE] Trashing returned status ${trashRes.status}:`, trashErr);
+
+      // Strategy 3: Remove from parent folder(s) (removeParents)
+      // This is the standard Google Drive API approach when user is an Editor in a shared folder, but NOT the owner of the file!
+      console.log(`[DRIVE DELETE] Attempting Strategy 3: removeParents for ${fileId}...`);
+
+      // First query file's parent folders and capabilities
+      const metaRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents,owners,capabilities,trashed&supportsAllDrives=true`,
+        {
+          headers: { Authorization: authHeader },
+        }
+      );
+
+      if (metaRes.status === 404) {
+        return res.json({
+          success: true,
+          message: 'File sudah tidak ada di Google Drive (sudah terhapus).',
+        });
+      }
+
+      let parentsToRemove: string[] = [];
+
+      if (metaRes.ok) {
+        const meta = await metaRes.json();
+        if (meta.trashed) {
+          return res.json({
+            success: true,
+            message: 'File sudah berada di tempat sampah Google Drive.',
+          });
+        }
+        if (Array.isArray(meta.parents)) {
+          parentsToRemove = [...meta.parents];
+        }
+      }
+
+      if (folderId && !parentsToRemove.includes(folderId)) {
+        parentsToRemove.push(folderId);
+      }
+
+      if (parentsToRemove.length > 0) {
+        const removeQuery = encodeURIComponent(parentsToRemove.join(','));
+        console.log(`[DRIVE DELETE] Removing file ${fileId} from parents: ${parentsToRemove.join(', ')}`);
+
+        const removeRes = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${removeQuery}&supportsAllDrives=true&enforceSingleParent=false`,
+          {
+            method: 'PATCH',
+            headers: {
+              Authorization: authHeader,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+          }
+        );
+
+        if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+          console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId}`);
+          return res.json({
+            success: true,
+            message: 'File berhasil dihapus dari folder Google Drive.',
+          });
+        }
+
+        const removeErr = await removeRes.json().catch(() => ({}));
+        console.warn(`[DRIVE DELETE] removeParents returned status ${removeRes.status}:`, removeErr);
+      }
+
+      // If all strategies failed, compile human-readable error explanation
+      const rawErrMsg =
+        trashErr?.error?.message ||
+        hardDeleteErr?.error?.message ||
+        'Izin akun Google Anda tidak mencukupi untuk menghapus file ini.';
+
+      let userFriendlyMsg = rawErrMsg;
+      if (
+        rawErrMsg.includes('insufficientFilePermissions') ||
+        rawErrMsg.includes('insufficient permissions') ||
+        rawErrMsg.includes('The user does not have sufficient permissions')
+      ) {
+        userFriendlyMsg =
+          'Akun Google Anda tidak memiliki izin untuk menghapus file ini (hanya pemilik file atau editor folder yang dapat menghapus). Silakan pastikan akun Anda memiliki hak akses Editor ke folder ini, atau Logout lalu Login kembali untuk memperbarui izin Google Drive.';
+      } else if (rawErrMsg.includes('Invalid Credentials') || rawErrMsg.includes('authError')) {
+        userFriendlyMsg =
+          'Kredensial login Google telah kedaluwarsa. Silakan Logout dan Login kembali untuk memperbarui akses.';
+      }
+
+      return res.status(403).json({
+        error: {
+          code: 'DELETE_RESTRICTED',
+          message: userFriendlyMsg,
+          rawError: rawErrMsg,
+        },
+      });
     } catch (error: any) {
       console.error('Server drive delete error:', error);
       return res.status(500).json({
-        error: { message: error.message || 'Terjadi kesalahan saat menghapus file di Google Drive' },
+        error: { message: error.message || 'Terjadi kesalahan sistem saat menghapus file di Google Drive' },
       });
     }
   });
