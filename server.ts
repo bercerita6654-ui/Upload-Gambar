@@ -6,14 +6,11 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Support raw binary uploads up to 50MB for image transfers
-  app.use(
-    '/api/drive',
-    express.raw({
-      type: '*/*',
-      limit: '50mb',
-    })
-  );
+  // Parser for raw binary image uploads (scoped only to upload and replace routes)
+  const rawBodyParser = express.raw({
+    type: '*/*',
+    limit: '50mb',
+  });
 
   app.use(express.json());
 
@@ -243,7 +240,7 @@ async function startServer() {
   });
 
   // Proxy upload to Google Drive API (Bypasses all browser CORS restrictions)
-  app.post('/api/drive/upload', async (req, res) => {
+  app.post('/api/drive/upload', rawBodyParser, async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader) {
@@ -310,7 +307,7 @@ async function startServer() {
   });
 
   // Proxy replace/overwrite to Google Drive API
-  app.patch('/api/drive/replace', async (req, res) => {
+  app.patch('/api/drive/replace', rawBodyParser, async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
       if (!authHeader) {
@@ -354,7 +351,7 @@ async function startServer() {
     }
   });
 
-  // Proxy delete file from Google Drive API
+  // Proxy delete file from Google Drive API with automatic trash fallback
   app.delete('/api/drive/delete', async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
@@ -367,6 +364,7 @@ async function startServer() {
         return res.status(400).json({ error: { message: 'ID file target tidak ditemukan.' } });
       }
 
+      // Step 1: Attempt hard delete
       const driveRes = await fetch(
         `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
         {
@@ -377,12 +375,29 @@ async function startServer() {
         }
       );
 
-      if (!driveRes.ok && driveRes.status !== 204) {
-        const data = await driveRes.json().catch(() => ({}));
-        return res.status(driveRes.status).json(data);
+      if (driveRes.ok || driveRes.status === 204) {
+        return res.json({ success: true, message: 'File berhasil dihapus dari Google Drive' });
       }
 
-      return res.json({ success: true, message: 'File berhasil dihapus dari Google Drive' });
+      // Step 2: Fallback to moving to trash if hard delete is restricted
+      const trashRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ trashed: true }),
+        }
+      );
+
+      if (trashRes.ok || trashRes.status === 204) {
+        return res.json({ success: true, message: 'File berhasil dipindahkan ke tempat sampah Google Drive' });
+      }
+
+      const data = await trashRes.json().catch(() => ({}));
+      return res.status(trashRes.status).json(data);
     } catch (error: any) {
       console.error('Server drive delete error:', error);
       return res.status(500).json({

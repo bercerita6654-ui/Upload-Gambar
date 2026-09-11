@@ -11,6 +11,8 @@ import {
   FileImage,
   ZoomIn,
   Maximize2,
+  Trash2,
+  Loader2,
 } from 'lucide-react';
 
 interface ReplaceOrCancelModalProps {
@@ -20,7 +22,9 @@ interface ReplaceOrCancelModalProps {
   onReplace: (item: UploadQueueItem) => void;
   onCancel: (item: UploadQueueItem) => void;
   onRename: (item: UploadQueueItem, newName: string) => void;
+  onDeleteExisting?: (item: UploadQueueItem) => void;
   isProcessing?: boolean;
+  isDeletingExisting?: boolean;
 }
 
 export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
@@ -30,7 +34,9 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
   onReplace,
   onCancel,
   onRename,
+  onDeleteExisting,
   isProcessing = false,
+  isDeletingExisting = false,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [newName, setNewName] = useState('');
@@ -305,21 +311,43 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
           </div>
         )}
 
-        {/* Primary Action Buttons: REPLACE vs CANCEL */}
+        {/* Primary Action Buttons: REPLACE vs CANCEL vs HAPUS DUPLICATE DI DRIVE */}
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
           <button
             type="button"
             onClick={() => onCancel(item)}
-            disabled={isProcessing}
+            disabled={isProcessing || isDeletingExisting}
             className="px-4 py-2.5 text-xs font-bold text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 active:bg-slate-300 rounded-xl transition-colors border border-slate-300 cursor-pointer text-center disabled:opacity-50"
           >
             Cancel (Batalkan Upload)
           </button>
 
+          {item.existingFile && onDeleteExisting && (
+            <button
+              type="button"
+              onClick={() => onDeleteExisting(item)}
+              disabled={isProcessing || isDeletingExisting}
+              className="px-4 py-2.5 text-xs font-bold text-red-700 hover:text-white bg-red-50 hover:bg-red-600 active:bg-red-700 rounded-xl transition-all border border-red-300 hover:border-red-600 cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+              title="Hapus file duplicate yang ada di Google Drive dan siapkan file baru untuk diupload"
+            >
+              {isDeletingExisting ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Menghapus...</span>
+                </>
+              ) : (
+                <>
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Hapus Duplicate di Drive</span>
+                </>
+              )}
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => onReplace(item)}
-            disabled={isProcessing}
+            disabled={isProcessing || isDeletingExisting}
             className="inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 active:bg-amber-800 rounded-xl transition-colors shadow-sm cursor-pointer disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isProcessing ? 'animate-spin' : ''}`} />

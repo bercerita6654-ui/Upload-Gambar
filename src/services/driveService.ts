@@ -334,11 +334,12 @@ export async function listFolderFiles(
 
 /**
  * Deletes a file from Google Drive (e.g. cleaning duplicate files).
+ * Uses a multi-tiered strategy: Server proxy -> Direct hard delete -> Direct trash move.
  */
 export async function deleteDriveFile(fileId: string, token: string): Promise<boolean> {
-  // First try server proxy route
+  // Tier 1: Try server proxy route (bypasses browser CORS restrictions)
   try {
-    const res = await fetch('/api/drive/delete', {
+    const res = await fetch(`/api/drive/delete?fileId=${encodeURIComponent(fileId)}`, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -349,25 +350,52 @@ export async function deleteDriveFile(fileId: string, token: string): Promise<bo
     if (res.ok) {
       return true;
     }
-  } catch {
-    // Fallback to direct Google Drive API
+  } catch (proxyErr) {
+    console.warn('Server proxy delete error, attempting direct Google Drive call:', proxyErr);
   }
 
-  // Fallback: Direct Google Drive API
-  const directRes = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
-    {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+  // Tier 2: Direct Google Drive API (Permanent DELETE)
+  try {
+    const directRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+
+    if (directRes.ok || directRes.status === 204) {
+      return true;
     }
-  );
-
-  if (!directRes.ok && directRes.status !== 204) {
-    const err = await directRes.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `Gagal menghapus file dari Google Drive (${directRes.status})`);
+  } catch (directErr) {
+    console.warn('Direct DELETE failed, falling back to moving to trash:', directErr);
   }
 
-  return true;
+  // Tier 3: Direct Google Drive API (Move to Trash)
+  // Highly reliable when permanent deletion permissions are restricted on the folder
+  try {
+    const trashRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ trashed: true }),
+      }
+    );
+
+    if (trashRes.ok || trashRes.status === 204) {
+      return true;
+    }
+
+    const err = await trashRes.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Gagal menghapus file dari Google Drive (${trashRes.status})`);
+  } catch (finalErr: unknown) {
+    const errObj = finalErr as { message?: string };
+    throw new Error(errObj.message || 'Gagal menghapus file dari Google Drive.');
+  }
 }

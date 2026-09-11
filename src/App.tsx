@@ -691,6 +691,68 @@ export default function App() {
     handleRenameItem(item.id, newName);
   };
 
+  const [isDeletingFromModal, setIsDeletingFromModal] = useState(false);
+
+  // User chooses "Hapus File Lama di Google Drive" directly from modal
+  const handleDeleteExistingFromModal = async (item: UploadQueueItem) => {
+    if (!token) {
+      showToast('error', 'Login Diperlukan', 'Silakan masuk dengan akun Google.');
+      return;
+    }
+    if (!item.existingFile) return;
+
+    setIsDeletingFromModal(true);
+    const targetCategory = item.category || 'aio';
+
+    try {
+      // 1. Delete the primary existing file from Google Drive
+      await deleteDriveFile(item.existingFile.id, token);
+
+      // 2. Also delete any extra duplicate copies in Drive if present
+      if (item.existingFile.allMatches && item.existingFile.allMatches.length > 1) {
+        const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
+        for (const copy of extraCopies) {
+          try {
+            await deleteDriveFile(copy.id, token);
+          } catch (delErr) {
+            console.warn('Could not auto-clean extra duplicate copy:', delErr);
+          }
+        }
+      }
+
+      // 3. Mark queue item as ready for upload
+      setQueue((prev) =>
+        prev.map((i) =>
+          i.id === item.id
+            ? {
+                ...i,
+                status: 'ready',
+                existingFile: undefined,
+                error: undefined,
+              }
+            : i
+        )
+      );
+
+      setDuplicateModalItem(null);
+      showToast(
+        'success',
+        'File Berhasil Dihapus dari Drive',
+        `File ${item.existingFile.name} telah berhasil dihapus dari Google Drive. File baru kini siap diupload!`
+      );
+
+      fetchFolderContent(targetCategory, token);
+    } catch (err: unknown) {
+      const errObj = err as { message?: string };
+      showToast(
+        'error',
+        'Gagal Menghapus File Lama',
+        errObj.message || 'Terjadi kesalahan saat menghapus file lama di Google Drive.'
+      );
+    } finally {
+      setIsDeletingFromModal(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col antialiased">
@@ -830,7 +892,9 @@ export default function App() {
         onReplace={handleExecuteReplace}
         onCancel={handleCancelReplace}
         onRename={handleRenameFromModal}
+        onDeleteExisting={handleDeleteExistingFromModal}
         isProcessing={isReplacingFile}
+        isDeletingExisting={isDeletingFromModal}
       />
     </div>
   );
