@@ -15,6 +15,7 @@ import {
   validatePngFileName,
   getImageDimensions,
   analyzeImageRatio,
+  detectCategoryFromRatio,
 } from './config/driveConfig';
 import {
   initAuth,
@@ -27,9 +28,9 @@ import {
   uploadPngToDrive,
   replaceExistingFileInDrive,
   listFolderFiles,
+  deleteDriveFile,
 } from './services/driveService';
 import { Header } from './components/Header';
-import { FolderSelector } from './components/FolderSelector';
 import { UploadDropzone } from './components/UploadDropzone';
 import { UploadQueueList } from './components/UploadQueueList';
 import { DriveFolderBrowser } from './components/DriveFolderBrowser';
@@ -50,15 +51,12 @@ export default function App() {
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Folder Category ('aio' | 'story')
-  const [selectedCategory, setSelectedCategory] = useState<FolderCategory>('aio');
+  // Active view tab for Drive Folder Browser ('aio' | 'story')
+  const [activeBrowserFolder, setActiveBrowserFolder] = useState<FolderCategory>('aio');
 
-  // Separate queues for each folder category so history is NEVER mixed
-  const [queues, setQueues] = useState<Record<FolderCategory, UploadQueueItem[]>>({
-    aio: [],
-    story: [],
-  });
-  const currentQueue = queues[selectedCategory];
+  // Unified upload queue where each item has its own auto-detected category
+  const [queue, setQueue] = useState<UploadQueueItem[]>([]);
+  const [queueFilter, setQueueFilter] = useState<'all' | FolderCategory>('all');
   const [isUploadingAny, setIsUploadingAny] = useState<boolean>(false);
 
   // Drive folder cache files
@@ -106,7 +104,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // 2. Fetch files in folder when auth token or category changes
+  // 2. Fetch files in folder when auth token or folder changes
   const fetchFolderContent = useCallback(
     async (category: FolderCategory, activeToken?: string | null) => {
       const authToken = activeToken || token;
@@ -131,9 +129,10 @@ export default function App() {
 
   useEffect(() => {
     if (token) {
-      fetchFolderContent(selectedCategory, token);
+      fetchFolderContent('aio', token);
+      fetchFolderContent('story', token);
     }
-  }, [token, selectedCategory, fetchFolderContent]);
+  }, [token, fetchFolderContent]);
 
   // Auth Handlers
   const handleLogin = async () => {
@@ -149,7 +148,29 @@ export default function App() {
           'Terhubung ke Google Drive',
           `Berhasil masuk sebagai ${result.user.displayName || result.user.email}`
         );
-        fetchFolderContent(selectedCategory, result.accessToken);
+        fetchFolderContent('aio', result.accessToken);
+        fetchFolderContent('story', result.accessToken);
+
+        // Re-verify any pending files in queue with fresh Google Drive credentials
+        setQueue((prevQueue) => {
+          if (prevQueue.length > 0) {
+            Promise.all(
+              prevQueue.map((item) => verifyQueueItem(item, result.accessToken))
+            ).then((verifiedList) => {
+              setQueue(verifiedList);
+              const foundDup = verifiedList.find((v) => v.status === 'duplicate_found');
+              if (foundDup) {
+                setDuplicateModalItem(foundDup);
+                showToast(
+                  'warning',
+                  'Duplikat Ditemukan!',
+                  `File ${foundDup.file.name} sudah ada di folder Google Drive ${TARGET_FOLDERS[foundDup.category].name}.`
+                );
+              }
+            });
+          }
+          return prevQueue;
+        });
       }
     } catch (err: unknown) {
       const errObj = err as { message?: string };
@@ -172,17 +193,17 @@ export default function App() {
   const verifyQueueItem = useCallback(
     async (
       item: UploadQueueItem,
-      cat: FolderCategory,
       activeToken: string | null
     ): Promise<UploadQueueItem> => {
+      const targetCategory = item.category || 'aio';
+
       // 1. Analyze image dimensions & aspect ratio
       let ratioInfo = item.ratioInfo;
       if (!ratioInfo || ratioInfo.width === 0) {
         const dims = await getImageDimensions(item.file);
-        ratioInfo = analyzeImageRatio(dims.width, dims.height, cat);
+        ratioInfo = analyzeImageRatio(dims.width, dims.height, targetCategory);
       } else {
-        // Re-analyze for potentially updated category
-        ratioInfo = analyzeImageRatio(ratioInfo.width, ratioInfo.height, cat);
+        ratioInfo = analyzeImageRatio(ratioInfo.width, ratioInfo.height, targetCategory);
       }
 
       // 2. Format and 5-digit filename validation
@@ -207,16 +228,18 @@ export default function App() {
         };
       }
 
-      const folderId = TARGET_FOLDERS[cat].folderId;
+      const folderId = TARGET_FOLDERS[targetCategory].folderId;
       try {
         const existing = await checkFileExistsInFolder(folderId, item.file.name, activeToken);
         if (existing) {
-          // File with same name already exists in target folder!
+          const dupCount = existing.duplicateCount && existing.duplicateCount > 1
+            ? ` (${existing.duplicateCount} file kembar di Drive)`
+            : '';
           return {
             ...item,
             ratioInfo,
             status: 'duplicate_found',
-            statusMessage: `File "${item.file.name}" sudah pernah di-upload ke ${TARGET_FOLDERS[cat].name}`,
+            statusMessage: `File "${item.file.name}" sudah ada di folder ${TARGET_FOLDERS[targetCategory].name}${dupCount}`,
             existingFile: existing,
           };
         }
@@ -241,100 +264,110 @@ export default function App() {
     []
   );
 
-  // When files are dropped or selected
+  // When files are dropped or selected through the SINGLE smart upload button/dropzone
   const handleFilesSelected = async (newFiles: File[]) => {
-    const newItems: UploadQueueItem[] = newFiles.map((file) => ({
-      id: `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      file,
-      previewUrl: URL.createObjectURL(file),
-      status: 'checking_drive',
-      category: selectedCategory,
-      uploadProgress: 0,
-    }));
+    if (newFiles.length === 0) return;
 
-    // Add items immediately to the selected category queue (isolated from other category)
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: [...prev[selectedCategory], ...newItems],
-    }));
+    // Inspect and detect ratio for each file immediately
+    const preparedItems: UploadQueueItem[] = await Promise.all(
+      newFiles.map(async (file) => {
+        const dims = await getImageDimensions(file);
+        const { detectedCategory } = detectCategoryFromRatio(dims.width, dims.height);
+        const ratioInfo = analyzeImageRatio(dims.width, dims.height, detectedCategory);
 
-    // Check each file asynchronously
-    let hasDuplicate = false;
-    let duplicateFileName = '';
-
-    const verifiedItems = await Promise.all(
-      newItems.map(async (item) => {
-        const checked = await verifyQueueItem(item, selectedCategory, token);
-        if (checked.status === 'duplicate_found') {
-          hasDuplicate = true;
-          duplicateFileName = checked.file.name;
-        }
-        return checked;
+        return {
+          id: `${file.name}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+          file,
+          previewUrl: URL.createObjectURL(file),
+          status: 'checking_drive' as const,
+          category: detectedCategory,
+          ratioInfo,
+          uploadProgress: 0,
+        };
       })
     );
 
-    // Update queue with verified states in current category only
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: prev[selectedCategory].map((item) => {
-        const match = verifiedItems.find((v) => v.id === item.id);
-        return match || item;
-      }),
-    }));
+    // Append to unified queue immediately
+    setQueue((prev) => [...prev, ...preparedItems]);
 
-    if (hasDuplicate) {
+    // Check duplicate in Drive asynchronously
+    let hasDuplicate = false;
+    let firstDuplicateItem: UploadQueueItem | null = null;
+    let aioCount = 0;
+    let storyCount = 0;
+
+    const verifiedItems = await Promise.all(
+      preparedItems.map(async (item) => {
+        if (item.category === 'aio') aioCount++;
+        else storyCount++;
+
+        const verified = await verifyQueueItem(item, token);
+        if (verified.status === 'duplicate_found') {
+          hasDuplicate = true;
+          if (!firstDuplicateItem) firstDuplicateItem = verified;
+        }
+        return verified;
+      })
+    );
+
+    // Update queue items with verified states
+    setQueue((prev) =>
+      prev.map((item) => {
+        const found = verifiedItems.find((v) => v.id === item.id);
+        return found || item;
+      })
+    );
+
+    // Smart notification for automatic classification
+    if (aioCount > 0 && storyCount > 0) {
+      showToast(
+        'info',
+        'Auto-Routing Rasio Aktif',
+        `${newFiles.length} file dikenali: ${aioCount} gambar AIO (1:1) dan ${storyCount} story (4:5).`
+      );
+    } else if (aioCount > 0) {
+      showToast(
+        'info',
+        'Auto-Routing AIO (1:1)',
+        `${aioCount} file otomatis diarahkan ke Folder Gambar AIO (Rasio 1:1 Persegi).`
+      );
+    } else if (storyCount > 0) {
+      showToast(
+        'info',
+        'Auto-Routing Story (4:5)',
+        `${storyCount} file otomatis diarahkan ke Folder Story Product (Rasio 4:5 Portrait).`
+      );
+    }
+
+    if (hasDuplicate && firstDuplicateItem) {
       showToast(
         'warning',
         'File Duplikat Terdeteksi!',
-        `File ${duplicateFileName} sudah pernah di-upload atau memiliki nama yang sama di folder ${TARGET_FOLDERS[selectedCategory].name}.`
+        `File ${(firstDuplicateItem as UploadQueueItem).file.name} sudah ada di folder Google Drive ${
+          TARGET_FOLDERS[(firstDuplicateItem as UploadQueueItem).category].name
+        }.`
       );
-
-      // Otomatis munculkan pop up untuk replace atau cancel
-      const firstDuplicate = verifiedItems.find((v) => v.status === 'duplicate_found');
-      if (firstDuplicate) {
-        setDuplicateModalItem(firstDuplicate);
-      }
+      setDuplicateModalItem(firstDuplicateItem);
     }
   };
 
-  // Switch folder category: queues and history are kept completely separated!
-  const handleSelectCategory = (cat: FolderCategory) => {
-    setSelectedCategory(cat);
-  };
-
-  // Move specific item from current category to another category (e.g. from ratio recommendation)
-  const handleMoveItemToCategory = async (itemId: string, targetCategory: FolderCategory) => {
-    const sourceCategory = selectedCategory;
-    const item = queues[sourceCategory].find((i) => i.id === itemId);
+  // Toggle category between 'aio' and 'story'
+  const handleToggleCategory = async (itemId: string) => {
+    const item = queue.find((i) => i.id === itemId);
     if (!item) return;
 
-    // Remove from source queue
-    setQueues((prev) => ({
-      ...prev,
-      [sourceCategory]: prev[sourceCategory].filter((i) => i.id !== itemId),
-    }));
-
-    const itemToMove: UploadQueueItem = {
+    const newCategory: FolderCategory = item.category === 'aio' ? 'story' : 'aio';
+    const updatedItem: UploadQueueItem = {
       ...item,
-      category: targetCategory,
+      category: newCategory,
       status: 'checking_drive',
       statusMessage: undefined,
     };
 
-    // Add to target category queue
-    setQueues((prev) => ({
-      ...prev,
-      [targetCategory]: [...prev[targetCategory], itemToMove],
-    }));
+    setQueue((prev) => prev.map((i) => (i.id === itemId ? updatedItem : i)));
 
-    setSelectedCategory(targetCategory);
-
-    // Verify against target category folder
-    const verified = await verifyQueueItem(itemToMove, targetCategory, token);
-    setQueues((prev) => ({
-      ...prev,
-      [targetCategory]: prev[targetCategory].map((i) => (i.id === itemId ? verified : i)),
-    }));
+    const verified = await verifyQueueItem(updatedItem, token);
+    setQueue((prev) => prev.map((i) => (i.id === itemId ? verified : i)));
 
     if (verified.status === 'duplicate_found') {
       setDuplicateModalItem(verified);
@@ -342,57 +375,47 @@ export default function App() {
 
     showToast(
       'info',
-      'File Dipindahkan ke Antrean Baru',
-      `File ${item.file.name} dipindahkan ke antrean ${TARGET_FOLDERS[targetCategory].name}.`
+      'Target Folder Diubah',
+      `File ${item.file.name} kini ditargetkan ke ${TARGET_FOLDERS[newCategory].name}.`
     );
   };
 
-  // Remove single item from current category queue
+  // Remove single item from queue
   const handleRemoveItem = (id: string) => {
-    setQueues((prev) => {
-      const target = prev[selectedCategory].find((item) => item.id === id);
+    setQueue((prev) => {
+      const target = prev.find((item) => item.id === id);
       if (target?.previewUrl) {
         URL.revokeObjectURL(target.previewUrl);
       }
-      return {
-        ...prev,
-        [selectedCategory]: prev[selectedCategory].filter((item) => item.id !== id),
-      };
+      return prev.filter((item) => item.id !== id);
     });
   };
 
-  // Clear completed items in current category queue
+  // Clear completed items from queue
   const handleClearCompleted = () => {
-    setQueues((prev) => {
-      prev[selectedCategory].forEach((item) => {
+    setQueue((prev) => {
+      prev.forEach((item) => {
         if (item.status === 'success' && item.previewUrl) {
           URL.revokeObjectURL(item.previewUrl);
         }
       });
-      return {
-        ...prev,
-        [selectedCategory]: prev[selectedCategory].filter((item) => item.status !== 'success'),
-      };
+      return prev.filter((item) => item.status !== 'success');
     });
   };
 
-  // Clear all items in current category queue
+  // Clear all items from queue
   const handleClearAll = () => {
-    queues[selectedCategory].forEach((item) => {
+    queue.forEach((item) => {
       if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
     });
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: [],
-    }));
+    setQueue([]);
   };
 
-  // Inline rename item in current category queue
+  // Inline rename item in queue
   const handleRenameItem = async (id: string, newFileName: string) => {
-    const item = queues[selectedCategory].find((i) => i.id === id);
+    const item = queue.find((i) => i.id === id);
     if (!item) return;
 
-    // Create a new File instance with the updated name
     const renamedFile = new File([item.file], newFileName, { type: item.file.type || 'image/png' });
     const updatedItem: UploadQueueItem = {
       ...item,
@@ -401,22 +424,16 @@ export default function App() {
       statusMessage: undefined,
     };
 
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: prev[selectedCategory].map((i) => (i.id === id ? updatedItem : i)),
-    }));
+    setQueue((prev) => prev.map((i) => (i.id === id ? updatedItem : i)));
 
-    const verified = await verifyQueueItem(updatedItem, selectedCategory, token);
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: prev[selectedCategory].map((i) => (i.id === id ? verified : i)),
-    }));
+    const verified = await verifyQueueItem(updatedItem, token);
+    setQueue((prev) => prev.map((i) => (i.id === id ? verified : i)));
 
     if (verified.status === 'duplicate_found') {
       showToast(
         'warning',
         'File Duplikat Terdeteksi',
-        `File bernama ${newFileName} sudah pernah di-upload di ${TARGET_FOLDERS[selectedCategory].name}.`
+        `File bernama ${newFileName} sudah pernah di-upload di ${TARGET_FOLDERS[item.category].name}.`
       );
       setDuplicateModalItem(verified);
     }
@@ -439,15 +456,44 @@ export default function App() {
       }
     }
 
-    const targetFolderId = TARGET_FOLDERS[selectedCategory].folderId;
+    const targetCategory = item.category || 'aio';
+    const targetFolderId = TARGET_FOLDERS[targetCategory].folderId;
 
-    // Update status to uploading in selected category queue
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: prev[selectedCategory].map((i) =>
-        i.id === item.id ? { ...i, status: 'uploading', uploadProgress: 5 } : i
-      ),
-    }));
+    // 🛑 REAL-TIME PRE-UPLOAD GUARD:
+    // Check if the file ALREADY exists in Google Drive right now before uploading!
+    // Prevents duplicate creation even if files were uploaded in another tab or before login.
+    try {
+      const existing = await checkFileExistsInFolder(targetFolderId, item.file.name, currentToken);
+      if (existing) {
+        const dupCount = existing.duplicateCount || 1;
+        const msg =
+          dupCount > 1
+            ? `Pencegahan Duplikat: File "${item.file.name}" terdeteksi sudah memiliki ${dupCount} file di folder Google Drive ${TARGET_FOLDERS[targetCategory].name}.`
+            : `Pencegahan Duplikat: File "${item.file.name}" sudah ada di folder Google Drive ${TARGET_FOLDERS[targetCategory].name}.`;
+
+        const duplicateItem: UploadQueueItem = {
+          ...item,
+          status: 'duplicate_found',
+          statusMessage: msg,
+          existingFile: existing,
+        };
+
+        setQueue((prev) => prev.map((i) => (i.id === item.id ? duplicateItem : i)));
+        setDuplicateModalItem(duplicateItem);
+        showToast(
+          'warning',
+          'Duplikat Terdeteksi!',
+          `Upload file ${item.file.name} otomatis dicegah agar tidak membuat file ganda di Google Drive.`
+        );
+        return false;
+      }
+    } catch (checkErr) {
+      console.warn('Pre-upload duplicate check error:', checkErr);
+    }
+
+    setQueue((prev) =>
+      prev.map((i) => (i.id === item.id ? { ...i, status: 'uploading', uploadProgress: 10 } : i))
+    );
 
     try {
       const result = await uploadPngToDrive(
@@ -456,18 +502,14 @@ export default function App() {
         currentToken,
         item.file.name,
         (progress) => {
-          setQueues((prev) => ({
-            ...prev,
-            [selectedCategory]: prev[selectedCategory].map((i) =>
-              i.id === item.id ? { ...i, uploadProgress: progress } : i
-            ),
-          }));
+          setQueue((prev) =>
+            prev.map((i) => (i.id === item.id ? { ...i, uploadProgress: progress } : i))
+          );
         }
       );
 
-      setQueues((prev) => ({
-        ...prev,
-        [selectedCategory]: prev[selectedCategory].map((i) =>
+      setQueue((prev) =>
+        prev.map((i) =>
           i.id === item.id
             ? {
                 ...i,
@@ -477,17 +519,16 @@ export default function App() {
                 uploadedFileId: result.id,
               }
             : i
-        ),
-      }));
+        )
+      );
 
       // Refresh folder cache
-      fetchFolderContent(selectedCategory, currentToken);
+      fetchFolderContent(targetCategory, currentToken);
       return true;
     } catch (err: unknown) {
       const errObj = err as { message?: string };
-      setQueues((prev) => ({
-        ...prev,
-        [selectedCategory]: prev[selectedCategory].map((i) =>
+      setQueue((prev) =>
+        prev.map((i) =>
           i.id === item.id
             ? {
                 ...i,
@@ -495,8 +536,8 @@ export default function App() {
                 error: errObj.message || 'Gagal mengupload file ke Google Drive',
               }
             : i
-        ),
-      }));
+        )
+      );
       return false;
     }
   };
@@ -509,10 +550,10 @@ export default function App() {
     setIsUploadingAny(false);
   };
 
-  // Upload All Ready Files in sequence
+  // Upload All Ready Files in sequence (MASTER SMART UPLOAD)
   const handleUploadAllReady = async () => {
     if (isUploadingAny) return;
-    const readyItems = currentQueue.filter((i) => i.status === 'ready');
+    const readyItems = queue.filter((i) => i.status === 'ready');
     if (readyItems.length === 0) return;
 
     setIsUploadingAny(true);
@@ -526,12 +567,12 @@ export default function App() {
     setIsUploadingAny(false);
     showToast(
       'success',
-      'Upload Selesai',
-      `Berhasil mengunggah ${successCount} dari ${readyItems.length} file ke ${TARGET_FOLDERS[selectedCategory].name}.`
+      'Proses Upload Selesai',
+      `Berhasil mengunggah ${successCount} dari ${readyItems.length} file ke Google Drive sesuai target rasio masing-masing.`
     );
   };
 
-  // Eksekusi Replace ketika user memilih "Replace Gambar di Drive" pada pop-up
+  // Execute Replace when user chooses "Replace Gambar di Drive" on modal
   const handleExecuteReplace = async (item: UploadQueueItem) => {
     if (!token) {
       showToast('error', 'Login Diperlukan', 'Silakan hubungkan akun Google terlebih dahulu.');
@@ -539,13 +580,11 @@ export default function App() {
     }
 
     setIsReplacingFile(true);
+    const targetCategory = item.category || 'aio';
 
-    setQueues((prev) => ({
-      ...prev,
-      [selectedCategory]: prev[selectedCategory].map((i) =>
-        i.id === item.id ? { ...i, status: 'uploading', uploadProgress: 10 } : i
-      ),
-    }));
+    setQueue((prev) =>
+      prev.map((i) => (i.id === item.id ? { ...i, status: 'uploading', uploadProgress: 10 } : i))
+    );
 
     try {
       let result;
@@ -555,34 +594,27 @@ export default function App() {
           item.file,
           token,
           (progress) => {
-            setQueues((prev) => ({
-              ...prev,
-              [selectedCategory]: prev[selectedCategory].map((i) =>
-                i.id === item.id ? { ...i, uploadProgress: progress } : i
-              ),
-            }));
+            setQueue((prev) =>
+              prev.map((i) => (i.id === item.id ? { ...i, uploadProgress: progress } : i))
+            );
           }
         );
       } else {
         result = await uploadPngToDrive(
-          TARGET_FOLDERS[selectedCategory].folderId,
+          TARGET_FOLDERS[targetCategory].folderId,
           item.file,
           token,
           item.file.name,
           (progress) => {
-            setQueues((prev) => ({
-              ...prev,
-              [selectedCategory]: prev[selectedCategory].map((i) =>
-                i.id === item.id ? { ...i, uploadProgress: progress } : i
-              ),
-            }));
+            setQueue((prev) =>
+              prev.map((i) => (i.id === item.id ? { ...i, uploadProgress: progress } : i))
+            );
           }
         );
       }
 
-      setQueues((prev) => ({
-        ...prev,
-        [selectedCategory]: prev[selectedCategory].map((i) =>
+      setQueue((prev) =>
+        prev.map((i) =>
           i.id === item.id
             ? {
                 ...i,
@@ -592,25 +624,39 @@ export default function App() {
                 uploadedFileId: result.id,
               }
             : i
-        ),
-      }));
+        )
+      );
+
+      // Clean up any extra duplicate copies that already exist in Drive
+      let cleanedCount = 0;
+      if (item.existingFile?.allMatches && item.existingFile.allMatches.length > 1) {
+        const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
+        for (const copy of extraCopies) {
+          try {
+            await deleteDriveFile(copy.id, token);
+            cleanedCount++;
+          } catch (delErr) {
+            console.warn('Could not auto-clean extra duplicate copy:', delErr);
+          }
+        }
+      }
 
       setDuplicateModalItem(null);
       setIsReplacingFile(false);
 
+      const cleanupNotice = cleanedCount > 0 ? ` (serta ${cleanedCount} file kembar lama telah dibersihkan)` : '';
       showToast(
         'success',
         'Gambar Berhasil Di-Replace!',
-        `File ${item.file.name} telah berhasil di-replace di Google Drive folder ${TARGET_FOLDERS[selectedCategory].name}.`
+        `File ${item.file.name} telah berhasil di-replace di Google Drive folder ${TARGET_FOLDERS[targetCategory].name}${cleanupNotice}.`
       );
 
-      fetchFolderContent(selectedCategory, token);
+      fetchFolderContent(targetCategory, token);
     } catch (err: unknown) {
       const errObj = err as { message?: string };
       setIsReplacingFile(false);
-      setQueues((prev) => ({
-        ...prev,
-        [selectedCategory]: prev[selectedCategory].map((i) =>
+      setQueue((prev) =>
+        prev.map((i) =>
           i.id === item.id
             ? {
                 ...i,
@@ -618,8 +664,8 @@ export default function App() {
                 error: errObj.message || 'Gagal me-replace file di Google Drive',
               }
             : i
-        ),
-      }));
+        )
+      );
       showToast(
         'error',
         'Gagal Replace',
@@ -628,7 +674,7 @@ export default function App() {
     }
   };
 
-  // User memilih "Cancel (Batalkan Upload)" pada pop-up
+  // User chooses "Cancel (Batalkan Upload)" on modal
   const handleCancelReplace = (item: UploadQueueItem) => {
     setDuplicateModalItem(null);
     handleRemoveItem(item.id);
@@ -639,11 +685,12 @@ export default function App() {
     );
   };
 
-  // User memilih ganti nama file langsung dari pop-up
+  // User changes filename from modal
   const handleRenameFromModal = (item: UploadQueueItem, newName: string) => {
     setDuplicateModalItem(null);
     handleRenameItem(item.id, newName);
   };
+
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col antialiased">
@@ -659,7 +706,7 @@ export default function App() {
           fetchFolderContent('story', token);
         }}
         onShowToast={showToast}
-        activeCategory={selectedCategory}
+        activeCategory={activeBrowserFolder}
       />
 
       {/* Main Container */}
@@ -725,57 +772,47 @@ export default function App() {
           </div>
         )}
 
-        {/* 1. Target Folder Selector */}
-        <FolderSelector
-          selectedCategory={selectedCategory}
-          onSelectCategory={handleSelectCategory}
-          folderFileCount={{
-            aio: folderFiles.aio.length,
-            story: folderFiles.story.length,
-          }}
-          queueCount={{
-            aio: queues.aio.length,
-            story: queues.story.length,
-          }}
-        />
-
-        {/* 2. Upload Dropzone */}
+        {/* 1. SATU DROPZONE/TOMBOL UPLOAD PINTAR (Dual Auto-Detect 1:1 dan 4:5) */}
         <UploadDropzone
-          category={selectedCategory}
           onFilesSelected={handleFilesSelected}
           disabled={isUploadingAny}
         />
 
-        {/* 3. Upload Queue List (Active when current category has items in queue) */}
-        {currentQueue.length > 0 && (
+        {/* 2. Upload Queue List with Single Master Upload Button */}
+        {queue.length > 0 && (
           <UploadQueueList
-            items={currentQueue}
-            category={selectedCategory}
+            items={queue}
+            activeFilter={queueFilter}
+            onChangeFilter={setQueueFilter}
             onRemoveItem={handleRemoveItem}
             onRenameItem={handleRenameItem}
             onRecheckDuplicate={(id) => {
-              const it = currentQueue.find((i) => i.id === id);
-              if (it) verifyQueueItem(it, selectedCategory, token);
+              const it = queue.find((i) => i.id === id);
+              if (it) verifyQueueItem(it, token);
             }}
             onRequestOverwrite={(item) => setDuplicateModalItem(item)}
             onUploadSingle={handleUploadSingle}
             onUploadAllReady={handleUploadAllReady}
             onClearCompleted={handleClearCompleted}
             onClearAll={handleClearAll}
-            onSwitchCategory={handleSelectCategory}
-            onMoveItemToCategory={handleMoveItemToCategory}
+            onToggleCategory={handleToggleCategory}
             isUploadingAny={isUploadingAny}
           />
         )}
 
-        {/* 4. Drive Folder Content Inspector */}
+        {/* 3. Drive Folder Content Inspector with integrated folder tab switcher */}
         {user && (
           <DriveFolderBrowser
-            category={selectedCategory}
-            files={folderFiles[selectedCategory] || []}
+            category={activeBrowserFolder}
+            onSelectCategory={setActiveBrowserFolder}
+            folderFileCount={{
+              aio: folderFiles.aio.length,
+              story: folderFiles.story.length,
+            }}
+            files={folderFiles[activeBrowserFolder] || []}
             isLoading={isLoadingFolder}
             token={token}
-            onRefresh={() => fetchFolderContent(selectedCategory, token)}
+            onRefresh={() => fetchFolderContent(activeBrowserFolder, token)}
             onShowToast={showToast}
           />
         )}
@@ -785,7 +822,11 @@ export default function App() {
       <ReplaceOrCancelModal
         isOpen={!!duplicateModalItem}
         item={duplicateModalItem}
-        folderName={TARGET_FOLDERS[selectedCategory].name}
+        folderName={
+          duplicateModalItem
+            ? TARGET_FOLDERS[duplicateModalItem.category || 'aio'].name
+            : TARGET_FOLDERS[activeBrowserFolder].name
+        }
         onReplace={handleExecuteReplace}
         onCancel={handleCancelReplace}
         onRename={handleRenameFromModal}

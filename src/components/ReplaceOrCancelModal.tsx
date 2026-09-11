@@ -93,13 +93,22 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
         </div>
 
         {/* Informative message */}
-        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 leading-relaxed">
-          File dengan nama{' '}
-          <strong className="font-mono bg-white px-1.5 py-0.5 rounded border border-amber-300 text-slate-900">
-            {item.file.name}
-          </strong>{' '}
-          sudah pernah di-upload atau sudah ada di folder Google Drive{' '}
-          <strong>{folderName}</strong>.
+        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 leading-relaxed space-y-1.5">
+          <p>
+            File dengan nama{' '}
+            <strong className="font-mono bg-white px-1.5 py-0.5 rounded border border-amber-300 text-slate-900">
+              {item.file.name}
+            </strong>{' '}
+            sudah terdeteksi di folder Google Drive <strong>{folderName}</strong>.
+          </p>
+          {item.existingFile?.duplicateCount && item.existingFile.duplicateCount > 1 && (
+            <div className="p-2 bg-amber-100/70 border border-amber-300 rounded-lg text-amber-900 font-medium text-[11px] flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+              <span>
+                <strong>Perhatian:</strong> Ditemukan <strong>{item.existingFile.duplicateCount} file kembar</strong> di Google Drive dengan nama ini. Me-replace akan memperbarui file utama dan otomatis membersihkan file duplikat berlebih.
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Side-by-side preview comparison */}

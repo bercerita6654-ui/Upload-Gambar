@@ -354,6 +354,43 @@ async function startServer() {
     }
   });
 
+  // Proxy delete file from Google Drive API
+  app.delete('/api/drive/delete', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).json({ error: { message: 'Token otorisasi tidak ditemukan.' } });
+      }
+
+      const fileId = (req.headers['x-file-id'] as string) || (req.query.fileId as string);
+      if (!fileId) {
+        return res.status(400).json({ error: { message: 'ID file target tidak ditemukan.' } });
+      }
+
+      const driveRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization: authHeader,
+          },
+        }
+      );
+
+      if (!driveRes.ok && driveRes.status !== 204) {
+        const data = await driveRes.json().catch(() => ({}));
+        return res.status(driveRes.status).json(data);
+      }
+
+      return res.json({ success: true, message: 'File berhasil dihapus dari Google Drive' });
+    } catch (error: any) {
+      console.error('Server drive delete error:', error);
+      return res.status(500).json({
+        error: { message: error.message || 'Terjadi kesalahan saat menghapus file di Google Drive' },
+      });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

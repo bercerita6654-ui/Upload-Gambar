@@ -115,6 +115,98 @@ export function getImageDimensions(file: File): Promise<{ width: number; height:
 }
 
 /**
+ * Smart Auto-Detection Function:
+ * Otomatis mendeteksi 2 fungsi berdasarkan ukuran rasio sesuai aturan:
+ * 1. Rasio 1:1 (Persegi) -> Otomatis ke Gambar AIO (toleransi 5%)
+ * 2. Rasio 4:5 (Portrait) -> Otomatis ke Gambar Story Product (toleransi 5%)
+ * Jika non-standar, menentukan pendekatan terdekat dan menyertakan catatan.
+ */
+export function detectCategoryFromRatio(
+  width: number,
+  height: number
+): {
+  detectedCategory: FolderCategory;
+  ratioLabel: string;
+  ratio: number;
+  width: number;
+  height: number;
+  isExactRule: boolean;
+  explanation: string;
+  ruleBadge: string;
+} {
+  if (width === 0 || height === 0) {
+    return {
+      detectedCategory: 'aio',
+      ratioLabel: 'Dimensi Belum Diketahui',
+      ratio: 1,
+      width,
+      height,
+      isExactRule: false,
+      explanation: 'Dimensi belum dapat dibaca, default ke AIO.',
+      ruleBadge: 'Default AIO',
+    };
+  }
+
+  const ratio = width / height;
+  const isOneToOne = Math.abs(ratio - 1.0) <= 0.05; // 1:1 (toleransi 5%)
+  const isFourFive = Math.abs(ratio - 0.8) <= 0.05; // 4:5 (toleransi 5%)
+
+  if (isOneToOne) {
+    return {
+      detectedCategory: 'aio',
+      ratioLabel: '1:1 (Persegi / Square)',
+      ratio,
+      width,
+      height,
+      isExactRule: true,
+      explanation: 'Sesuai aturan Gambar AIO: Berukuran rasio 1:1 (Persegi)',
+      ruleBadge: 'Fungsi 1: AIO (1:1)',
+    };
+  }
+
+  if (isFourFive) {
+    return {
+      detectedCategory: 'story',
+      ratioLabel: '4:5 (Portrait / Story Feed)',
+      ratio,
+      width,
+      height,
+      isExactRule: true,
+      explanation: 'Sesuai aturan Story Product: Berukuran rasio 4:5 (Portrait)',
+      ruleBadge: 'Fungsi 2: Story (4:5)',
+    };
+  }
+
+  // Jika ukuran rasio non-standar (misal 9:16 atau custom):
+  // Tentukan apakah lebih dekat ke orientasi portrait (Story) atau square (AIO)
+  if (ratio < 0.9) {
+    // Rasio vertikal/portrait (tinggi > lebar)
+    return {
+      detectedCategory: 'story',
+      ratioLabel: `${width}×${height}px (${ratio.toFixed(2)}:1)`,
+      ratio,
+      width,
+      height,
+      isExactRule: false,
+      explanation: `Rasio vertikal (${width}×${height}px) otomatis diarahkan ke Story Product (acuan standar 4:5).`,
+      ruleBadge: 'Story (Mendekati 4:5)',
+    };
+  } else {
+    // Rasio mendekati persegi / lanskap
+    return {
+      detectedCategory: 'aio',
+      ratioLabel: `${width}×${height}px (${ratio.toFixed(2)}:1)`,
+      ratio,
+      width,
+      height,
+      isExactRule: false,
+      explanation: `Rasio persegi/lanskap (${width}×${height}px) otomatis diarahkan ke AIO (acuan standar 1:1).`,
+      ruleBadge: 'AIO (Mendekati 1:1)',
+    };
+  }
+}
+
+/**
  * Analyzes aspect ratio against target folder rules:
  * - AIO requires 1:1 (ratio = 1.0)
  * - Story Product requires 4:5 (ratio = 0.8)

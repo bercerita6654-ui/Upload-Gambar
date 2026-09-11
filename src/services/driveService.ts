@@ -2,14 +2,18 @@ import { DriveFileInfo } from '../types';
 
 /**
  * Searches if a file with the given name already exists in the target folder.
+ * Returns the file info, and includes duplicateCount & allMatches if multiple exist.
  */
 export async function checkFileExistsInFolder(
   folderId: string,
   fileName: string,
   token: string
-): Promise<DriveFileInfo | null> {
-  const escapedName = fileName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  const query = `'${folderId}' in parents and name = '${escapedName}' and trashed = false`;
+): Promise<(DriveFileInfo & { duplicateCount?: number; allMatches?: DriveFileInfo[] }) | null> {
+  const cleanName = fileName.trim();
+  const escapedName = cleanName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  
+  // Also check without extension if applicable or standard variations
+  const query = `'${folderId}' in parents and (name = '${escapedName}' or name = '${escapedName.toLowerCase()}' or name = '${escapedName.toUpperCase()}') and trashed = false`;
 
   const url = new URL('https://www.googleapis.com/drive/v3/files');
   url.searchParams.set('q', query);
@@ -19,7 +23,7 @@ export async function checkFileExistsInFolder(
   );
   url.searchParams.set('supportsAllDrives', 'true');
   url.searchParams.set('includeItemsFromAllDrives', 'true');
-  url.searchParams.set('pageSize', '5');
+  url.searchParams.set('pageSize', '20');
 
   const response = await fetch(url.toString(), {
     headers: {
@@ -39,7 +43,12 @@ export async function checkFileExistsInFolder(
 
   const data = await response.json();
   if (data.files && data.files.length > 0) {
-    return data.files[0] as DriveFileInfo;
+    const primary = data.files[0] as DriveFileInfo;
+    return {
+      ...primary,
+      duplicateCount: data.files.length,
+      allMatches: data.files as DriveFileInfo[],
+    };
   }
 
   return null;
@@ -274,7 +283,7 @@ export async function listFolderFiles(
   const url = new URL('https://www.googleapis.com/drive/v3/files');
   url.searchParams.set('q', query);
   url.searchParams.set('orderBy', 'createdTime desc');
-  url.searchParams.set('pageSize', '40');
+  url.searchParams.set('pageSize', '250');
   url.searchParams.set(
     'fields',
     'files(id, name, mimeType, size, webViewLink, webContentLink, createdTime, modifiedTime, thumbnailLink)'
@@ -299,4 +308,44 @@ export async function listFolderFiles(
 
   const data = await response.json();
   return (data.files || []) as DriveFileInfo[];
+}
+
+/**
+ * Deletes a file from Google Drive (e.g. cleaning duplicate files).
+ */
+export async function deleteDriveFile(fileId: string, token: string): Promise<boolean> {
+  // First try server proxy route
+  try {
+    const res = await fetch('/api/drive/delete', {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'x-file-id': fileId,
+      },
+    });
+
+    if (res.ok) {
+      return true;
+    }
+  } catch {
+    // Fallback to direct Google Drive API
+  }
+
+  // Fallback: Direct Google Drive API
+  const directRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!directRes.ok && directRes.status !== 204) {
+    const err = await directRes.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Gagal menghapus file dari Google Drive (${directRes.status})`);
+  }
+
+  return true;
 }

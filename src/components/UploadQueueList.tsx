@@ -21,11 +21,14 @@ import {
   Square,
   RectangleVertical,
   ArrowRightLeft,
+  Sparkles,
+  Layers,
 } from 'lucide-react';
 
 interface UploadQueueListProps {
   items: UploadQueueItem[];
-  category: FolderCategory;
+  activeFilter?: 'all' | FolderCategory;
+  onChangeFilter?: (filter: 'all' | FolderCategory) => void;
   onRemoveItem: (id: string) => void;
   onRenameItem: (id: string, newFileName: string) => void;
   onRecheckDuplicate: (id: string) => void;
@@ -34,14 +37,14 @@ interface UploadQueueListProps {
   onUploadAllReady: () => void;
   onClearCompleted: () => void;
   onClearAll: () => void;
-  onSwitchCategory: (newCategory: FolderCategory) => void;
-  onMoveItemToCategory?: (id: string, targetCategory: FolderCategory) => void;
+  onToggleCategory?: (id: string) => void;
   isUploadingAny: boolean;
 }
 
 export const UploadQueueList: React.FC<UploadQueueListProps> = ({
   items,
-  category,
+  activeFilter = 'all',
+  onChangeFilter,
   onRemoveItem,
   onRenameItem,
   onRecheckDuplicate,
@@ -50,21 +53,30 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
   onUploadAllReady,
   onClearCompleted,
   onClearAll,
-  onSwitchCategory,
-  onMoveItemToCategory,
+  onToggleCategory,
   isUploadingAny,
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editNameValue, setEditNameValue] = useState<string>('');
 
-  const targetConfig = TARGET_FOLDERS[category];
-  const isAio = category === 'aio';
+  // Counts by category
+  const aioItems = items.filter((i) => (i.category || 'aio') === 'aio');
+  const storyItems = items.filter((i) => i.category === 'story');
 
+  // Filtered items for display
+  const displayedItems =
+    activeFilter === 'all'
+      ? items
+      : items.filter((i) => (i.category || 'aio') === activeFilter);
+
+  // Global status counts
   const readyItems = items.filter((i) => i.status === 'ready');
+  const aioReadyCount = readyItems.filter((i) => (i.category || 'aio') === 'aio').length;
+  const storyReadyCount = readyItems.filter((i) => i.category === 'story').length;
+
   const duplicateItems = items.filter((i) => i.status === 'duplicate_found');
   const successItems = items.filter((i) => i.status === 'success');
   const errorItems = items.filter((i) => i.status === 'invalid_format' || i.status === 'error');
-  const ratioMismatchItems = items.filter((i) => i.ratioInfo && !i.ratioInfo.isMatchingTarget);
 
   const startEditing = (item: UploadQueueItem) => {
     setEditingId(item.id);
@@ -93,44 +105,129 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
   return (
     <div className="w-full space-y-4">
       {/* Header & Stats Bar */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs">
-        <div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <h3 className="text-sm font-bold text-slate-900">
-              Antrean &amp; Riwayat: {targetConfig.name} ({items.length} file)
-            </h3>
-            <span
-              className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-bold ${
-                isAio
-                  ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
-                  : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+      <div className="bg-white border border-slate-200 rounded-3xl p-4 sm:p-5 flex flex-col gap-4 shadow-xs">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                <Layers className="w-4 h-4 text-blue-600" />
+                <span>Antrean Upload Gambar ({items.length} file)</span>
+              </h3>
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                <Sparkles className="w-3 h-3 text-blue-500" />
+                Auto-Detect Rasio Aktif
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Sistem secara otomatis mengenali rasio ukuran setiap gambar: <strong>1:1</strong> diarahkan ke <strong>Gambar AIO</strong>, dan <strong>4:5</strong> diarahkan ke <strong>Story Product</strong>.
+            </p>
+          </div>
+
+          {/* Master Single Upload Button & Actions */}
+          <div className="flex items-center gap-2 self-stretch lg:self-auto justify-end flex-wrap">
+            {successItems.length > 0 && (
+              <button
+                onClick={onClearCompleted}
+                disabled={isUploadingAny}
+                className="px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Hapus Selesai
+              </button>
+            )}
+
+            <button
+              onClick={onClearAll}
+              disabled={isUploadingAny}
+              className="px-3 py-2 text-xs font-medium text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-xl border border-slate-200 hover:border-red-200 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              Kosongkan
+            </button>
+
+            {/* SATU TOMBOL UNGGAH UTAMA (MASTER SMART UPLOAD BUTTON) */}
+            <button
+              id="master-upload-all-button"
+              onClick={onUploadAllReady}
+              disabled={readyItems.length === 0 || isUploadingAny}
+              className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-bold text-white rounded-xl shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-indigo-600 via-blue-600 to-emerald-600 hover:from-indigo-700 hover:via-blue-700 hover:to-emerald-700 active:scale-98"
+            >
+              {isUploadingAny ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Sedang Mengunggah...</span>
+                </>
+              ) : (
+                <>
+                  <Upload className="w-4 h-4" />
+                  <span>
+                    {readyItems.length === 0
+                      ? 'Tidak Ada File Siap'
+                      : aioReadyCount > 0 && storyReadyCount > 0
+                      ? `Unggah ${readyItems.length} File (${aioReadyCount} AIO 1:1 • ${storyReadyCount} Story 4:5)`
+                      : aioReadyCount > 0
+                      ? `Unggah ${readyItems.length} File ke Folder AIO (1:1)`
+                      : `Unggah ${readyItems.length} File ke Folder Story (4:5)`}
+                  </span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* Filter Tabs & Badges Row */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-100">
+          {/* Filter Pills */}
+          <div className="flex items-center gap-1.5 p-1 bg-slate-100/90 rounded-xl w-fit">
+            <button
+              type="button"
+              onClick={() => onChangeFilter && onChangeFilter('all')}
+              className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                activeFilter === 'all'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              {isAio ? <Boxes className="w-3.5 h-3.5" /> : <ShoppingBag className="w-3.5 h-3.5" />}
-              Khusus {targetConfig.name} ({targetConfig.expectedRatio})
-            </span>
-          </div>
-          <p className="text-[11px] text-slate-500 mt-0.5">
-            Riwayat &amp; antrean terpisah khusus menu ini (tidak digabung dengan {isAio ? 'Story Product' : 'Gambar AIO'}).
-          </p>
+              Semua ({items.length})
+            </button>
 
-          <div className="flex flex-wrap items-center gap-2 mt-1.5 text-xs">
+            <button
+              type="button"
+              onClick={() => onChangeFilter && onChangeFilter('aio')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                activeFilter === 'aio'
+                  ? 'bg-indigo-600 text-white shadow-xs'
+                  : 'text-indigo-800 hover:bg-indigo-50'
+              }`}
+            >
+              <Square className="w-3 h-3" />
+              <span>AIO 1:1 ({aioItems.length})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onChangeFilter && onChangeFilter('story')}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                activeFilter === 'story'
+                  ? 'bg-emerald-600 text-white shadow-xs'
+                  : 'text-emerald-800 hover:bg-emerald-50'
+              }`}
+            >
+              <RectangleVertical className="w-3 h-3" />
+              <span>Story 4:5 ({storyItems.length})</span>
+            </button>
+          </div>
+
+          {/* Status summary tags */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
             {readyItems.length > 0 && (
               <span className="inline-flex items-center gap-1 text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
                 <CheckCircle2 className="w-3 h-3" />
-                {readyItems.length} Siap Diunggah
-              </span>
-            )}
-            {ratioMismatchItems.length > 0 && (
-              <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-50 px-2 py-0.5 rounded-full border border-amber-300">
-                <AlertTriangle className="w-3 h-3 text-amber-600" />
-                {ratioMismatchItems.length} Rasio Tidak Sesuai Acuan
+                {readyItems.length} Siap
               </span>
             )}
             {duplicateItems.length > 0 && (
-              <span className="inline-flex items-center gap-1 text-amber-800 font-semibold bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300 animate-pulse">
+              <span className="inline-flex items-center gap-1 text-amber-800 font-bold bg-amber-100 px-2 py-0.5 rounded-full border border-amber-300">
                 <AlertTriangle className="w-3 h-3 text-amber-600" />
-                {duplicateItems.length} Duplikat Terdeteksi
+                {duplicateItems.length} Duplikat
               </span>
             )}
             {errorItems.length > 0 && (
@@ -147,437 +244,377 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
             )}
           </div>
         </div>
-
-        {/* Global Action Buttons */}
-        <div className="flex items-center gap-2 self-stretch sm:self-auto justify-end flex-wrap">
-          {successItems.length > 0 && (
-            <button
-              onClick={onClearCompleted}
-              disabled={isUploadingAny}
-              className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg border border-slate-200 transition-colors cursor-pointer disabled:opacity-50"
-            >
-              Hapus Selesai
-            </button>
-          )}
-
-          <button
-            onClick={onClearAll}
-            disabled={isUploadingAny}
-            className="px-3 py-1.5 text-xs text-slate-600 hover:text-red-600 hover:bg-red-50 rounded-lg border border-slate-200 hover:border-red-200 transition-colors cursor-pointer disabled:opacity-50"
-          >
-            Kosongkan
-          </button>
-
-          <button
-            id="upload-all-ready-button"
-            onClick={onUploadAllReady}
-            disabled={readyItems.length === 0 || isUploadingAny}
-            className={`inline-flex items-center gap-1.5 px-4 py-2 text-xs font-bold text-white rounded-xl shadow-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-              isAio
-                ? 'bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800'
-                : 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800'
-            }`}
-          >
-            {isUploadingAny ? (
-              <>
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                <span>Mengunggah...</span>
-              </>
-            ) : (
-              <>
-                <Upload className="w-3.5 h-3.5" />
-                <span>Unggah {readyItems.length} File ke {isAio ? 'AIO (1:1)' : 'Story (4:5)'}</span>
-              </>
-            )}
-          </button>
-        </div>
       </div>
 
       {/* Item Cards */}
-      <div className="space-y-2.5">
-        {items.map((item) => {
-          const isEditing = editingId === item.id;
-          const ratioInfo = item.ratioInfo;
-          const isRatioMismatch = ratioInfo && !ratioInfo.isMatchingTarget;
+      <div className="space-y-3">
+        {displayedItems.length === 0 ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-slate-500">
+            <p className="text-sm">Tidak ada file dalam kategori ini.</p>
+          </div>
+        ) : (
+          displayedItems.map((item) => {
+            const isEditing = editingId === item.id;
+            const itemCategory = item.category || 'aio';
+            const isItemAio = itemCategory === 'aio';
+            const targetConfig = TARGET_FOLDERS[itemCategory];
+            const ratioInfo = item.ratioInfo;
 
-          return (
-            <div
-              key={item.id}
-              className={`p-3.5 sm:p-4 rounded-xl border bg-white transition-all shadow-xs ${
-                item.status === 'duplicate_found'
-                  ? 'border-amber-400 bg-amber-50/40 ring-1 ring-amber-400/30'
-                  : isRatioMismatch
-                  ? 'border-amber-300 bg-amber-50/20'
-                  : item.status === 'invalid_format'
-                  ? 'border-rose-300 bg-rose-50/30'
-                  : item.status === 'success'
-                  ? 'border-emerald-200 bg-emerald-50/30'
-                  : 'border-slate-200 hover:border-slate-300'
-              }`}
-            >
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                {/* Thumbnail and Title */}
-                <div className="flex items-center gap-3 min-w-0 flex-1">
-                  <div className="w-14 h-14 rounded-lg bg-slate-100 border border-slate-200 overflow-hidden shrink-0 flex items-center justify-center relative">
-                    <img
-                      src={item.previewUrl}
-                      alt={item.file.name}
-                      className="w-full h-full object-cover"
-                    />
-                    <span className="absolute bottom-0.5 right-0.5 px-1 rounded text-[9px] font-mono bg-black/70 text-white font-bold">
-                      PNG
-                    </span>
-                  </div>
+            return (
+              <div
+                key={item.id}
+                className={`p-4 rounded-2xl border bg-white transition-all shadow-xs ${
+                  item.status === 'duplicate_found'
+                    ? 'border-amber-400 bg-amber-50/40 ring-1 ring-amber-400/30'
+                    : item.status === 'invalid_format'
+                    ? 'border-rose-300 bg-rose-50/30'
+                    : item.status === 'success'
+                    ? 'border-emerald-200 bg-emerald-50/30'
+                    : isItemAio
+                    ? 'border-indigo-100 hover:border-indigo-300'
+                    : 'border-emerald-100 hover:border-emerald-300'
+                }`}
+              >
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  {/* Thumbnail and Title */}
+                  <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                    <div className="w-14 h-14 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden shrink-0 flex items-center justify-center relative shadow-2xs">
+                      <img
+                        src={item.previewUrl}
+                        alt={item.file.name}
+                        className="w-full h-full object-cover"
+                      />
+                      <span className="absolute bottom-0.5 right-0.5 px-1 rounded text-[9px] font-mono bg-black/75 text-white font-bold">
+                        PNG
+                      </span>
+                    </div>
 
-                  <div className="min-w-0 flex-1">
-                    {/* Filename or Inline Editor */}
-                    {isEditing ? (
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="text"
-                          value={editNameValue}
-                          onChange={(e) => setEditNameValue(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveEditing(item.id);
-                            if (e.key === 'Escape') cancelEditing();
-                          }}
-                          placeholder="cth: 11321.png"
-                          className="text-xs font-mono px-2.5 py-1 border-2 border-blue-500 rounded-lg focus:outline-hidden bg-white text-slate-900 w-44 shadow-xs"
-                          autoFocus
-                        />
-                        <button
-                          onClick={() => saveEditing(item.id)}
-                          className="p-1 rounded-md bg-blue-600 text-white hover:bg-blue-700 text-xs shadow-xs"
-                          title="Simpan nama baru"
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={cancelEditing}
-                          className="p-1 rounded-md bg-slate-200 text-slate-700 hover:bg-slate-300 text-xs"
-                          title="Batal"
-                        >
-                          <XCircle className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-bold text-slate-900 truncate">
-                          {item.file.name}
-                        </span>
-                        {item.status !== 'uploading' && item.status !== 'success' && (
+                    <div className="min-w-0 flex-1">
+                      {/* Filename or Inline Editor */}
+                      {isEditing ? (
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={editNameValue}
+                            onChange={(e) => setEditNameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') saveEditing(item.id);
+                              if (e.key === 'Escape') cancelEditing();
+                            }}
+                            placeholder="cth: 11321.png"
+                            className="text-xs font-mono px-2.5 py-1 border-2 border-blue-500 rounded-lg focus:outline-hidden bg-white text-slate-900 w-44 shadow-xs"
+                            autoFocus
+                          />
                           <button
-                            onClick={() => startEditing(item)}
-                            className="text-slate-400 hover:text-blue-600 p-1 rounded-md hover:bg-slate-100 transition-colors"
-                            title="Ubah nama file agar sesuai 5 digit"
+                            onClick={() => saveEditing(item.id)}
+                            className="p-1 rounded-md bg-blue-600 text-white hover:bg-blue-700 text-xs shadow-xs cursor-pointer"
+                            title="Simpan nama baru"
                           >
-                            <Edit2 className="w-3.5 h-3.5" />
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={cancelEditing}
+                            className="p-1 rounded-md bg-slate-200 text-slate-700 hover:bg-slate-300 text-xs cursor-pointer"
+                            title="Batal"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-bold text-slate-900 truncate">
+                            {item.file.name}
+                          </span>
+                          {item.status !== 'uploading' && item.status !== 'success' && (
+                            <button
+                              onClick={() => startEditing(item)}
+                              className="text-slate-400 hover:text-blue-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
+                              title="Ubah nama file"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 mt-1">
+                        <span>{formatFileSize(item.file.size)}</span>
+                        <span>•</span>
+
+                        {/* Image Dimension and Ratio Badge */}
+                        {ratioInfo && ratioInfo.width > 0 && (
+                          <>
+                            <span className="font-mono text-slate-700 font-medium">
+                              {ratioInfo.width}×{ratioInfo.height}px
+                            </span>
+                            <span>•</span>
+                            <span
+                              className={`inline-flex items-center gap-1 font-semibold px-2 py-0.5 rounded text-[11px] ${
+                                isItemAio
+                                  ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'
+                                  : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                              }`}
+                            >
+                              {isItemAio ? (
+                                <Square className="w-3 h-3 text-indigo-600" />
+                              ) : (
+                                <RectangleVertical className="w-3 h-3 text-emerald-600" />
+                              )}
+                              <span>Rasio: {ratioInfo.ratioLabel}</span>
+                            </span>
+                            <span>•</span>
+                          </>
+                        )}
+
+                        {/* Smart Detected Target Folder Badge */}
+                        <span
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md font-bold text-[11px] shadow-2xs ${
+                            isItemAio
+                              ? 'bg-indigo-100 text-indigo-900 border border-indigo-200'
+                              : 'bg-emerald-100 text-emerald-900 border border-emerald-200'
+                          }`}
+                        >
+                          {isItemAio ? (
+                            <Boxes className="w-3 h-3 text-indigo-700" />
+                          ) : (
+                            <ShoppingBag className="w-3 h-3 text-emerald-700" />
+                          )}
+                          <span>Target: {targetConfig.name}</span>
+                        </span>
+
+                        {/* Quick switch category button */}
+                        {item.status !== 'uploading' && item.status !== 'success' && onToggleCategory && (
+                          <button
+                            type="button"
+                            onClick={() => onToggleCategory(item.id)}
+                            className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-blue-700 hover:underline cursor-pointer ml-1"
+                            title={`Tukar target ke ${isItemAio ? 'Story Product (4:5)' : 'Gambar AIO (1:1)'}`}
+                          >
+                            <ArrowRightLeft className="w-3 h-3" />
+                            <span>Pindah ke {isItemAio ? 'Story' : 'AIO'}</span>
                           </button>
                         )}
                       </div>
-                    )}
+                    </div>
+                  </div>
 
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 mt-1">
-                      <span>{formatFileSize(item.file.size)}</span>
-                      <span>•</span>
-
-                      {/* Image Dimension and Ratio Badge */}
-                      {ratioInfo && ratioInfo.width > 0 && (
-                        <>
-                          <span className="font-mono text-slate-700 font-medium">
-                            {ratioInfo.width}×{ratioInfo.height}px
-                          </span>
-                          <span>•</span>
-                          <span
-                            className={`inline-flex items-center gap-1 font-semibold px-2 py-0.5 rounded text-[11px] ${
-                              ratioInfo.isMatchingTarget
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-amber-100 text-amber-800 border border-amber-300'
-                            }`}
-                          >
-                            {isAio ? (
-                              <Square className="w-3 h-3" />
-                            ) : (
-                              <RectangleVertical className="w-3 h-3" />
-                            )}
-                            <span>Rasio: {ratioInfo.ratioLabel}</span>
-                            {ratioInfo.isMatchingTarget ? (
-                              <Check className="w-3 h-3 text-emerald-700" />
-                            ) : (
-                              <AlertTriangle className="w-3 h-3 text-amber-700" />
-                            )}
-                          </span>
-                          <span>•</span>
-                        </>
+                  {/* Status Badges & Controls */}
+                  <div className="flex items-center gap-2 self-stretch sm:self-auto justify-between sm:justify-end border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-100">
+                    <div>
+                      {item.status === 'checking_drive' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-100 text-slate-700">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                          <span>Cek Drive...</span>
+                        </span>
                       )}
 
-                      <span
-                        className={`inline-flex items-center gap-1 font-semibold ${
-                          isAio ? 'text-indigo-700' : 'text-emerald-700'
-                        }`}
-                      >
-                        {isAio ? <Boxes className="w-3 h-3" /> : <ShoppingBag className="w-3 h-3" />}
-                        {targetConfig.name}
-                      </span>
+                      {item.status === 'ready' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Aman Diunggah</span>
+                        </span>
+                      )}
+
+                      {item.status === 'duplicate_found' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                          <span>Duplikat Terdeteksi</span>
+                        </span>
+                      )}
+
+                      {item.status === 'invalid_format' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200">
+                          <FileWarning className="w-3.5 h-3.5 text-rose-600" />
+                          <span>Bukan 5-Digit PNG</span>
+                        </span>
+                      )}
+
+                      {item.status === 'uploading' && (
+                        <div className="flex items-center gap-2">
+                          <div className="w-24 bg-slate-200 rounded-full h-2 overflow-hidden">
+                            <div
+                              className={`h-2 transition-all duration-200 rounded-full ${
+                                isItemAio ? 'bg-indigo-600' : 'bg-emerald-600'
+                              }`}
+                              style={{ width: `${item.uploadProgress}%` }}
+                            />
+                          </div>
+                          <span className="text-xs font-mono font-bold text-slate-800">
+                            {item.uploadProgress}%
+                          </span>
+                        </div>
+                      )}
+
+                      {item.status === 'success' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Tersimpan di Drive</span>
+                        </span>
+                      )}
+
+                      {item.status === 'error' && (
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium bg-red-50 text-red-700 border border-red-200">
+                          <XCircle className="w-3.5 h-3.5 text-red-600" />
+                          <span>Gagal Upload</span>
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-1.5">
+                      {item.status === 'ready' && !isUploadingAny && (
+                        <button
+                          onClick={() => onUploadSingle(item)}
+                          className={`px-3 py-1.5 text-xs font-bold text-white rounded-lg transition-colors cursor-pointer shadow-xs ${
+                            isItemAio
+                              ? 'bg-indigo-600 hover:bg-indigo-700'
+                              : 'bg-emerald-600 hover:bg-emerald-700'
+                          }`}
+                          title={`Unggah ke folder ${targetConfig.name}`}
+                        >
+                          Unggah ke {isItemAio ? 'AIO' : 'Story'}
+                        </button>
+                      )}
+
+                      {item.status === 'duplicate_found' && (
+                        <button
+                          onClick={() => onRequestOverwrite(item)}
+                          className="px-2.5 py-1.5 text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 rounded-lg transition-colors shadow-xs cursor-pointer"
+                          title="Buka pilihan replace gambar atau cancel"
+                        >
+                          Replace / Cancel
+                        </button>
+                      )}
+
+                      {item.status === 'success' && item.uploadedDriveUrl && (
+                        <a
+                          href={item.uploadedDriveUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-slate-100 text-slate-700 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                          title="Buka file di Google Drive"
+                        >
+                          <span>Buka</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+
+                      {item.status === 'error' && (
+                        <button
+                          onClick={() => onRecheckDuplicate(item.id)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-slate-100 transition-colors cursor-pointer"
+                          title="Coba lagi"
+                        >
+                          <RefreshCw className="w-4 h-4" />
+                        </button>
+                      )}
+
+                      {item.status !== 'uploading' && (
+                        <button
+                          onClick={() => onRemoveItem(item.id)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                          title="Hapus dari antrean"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                {/* Status Badges & Controls */}
-                <div className="flex items-center gap-2 self-stretch sm:self-auto justify-between sm:justify-end border-t sm:border-t-0 pt-2 sm:pt-0 border-slate-100">
-                  {/* Status Badges */}
-                  <div>
-                    {item.status === 'checking_drive' && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-700">
-                        <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
-                        <span>Cek Drive...</span>
-                      </span>
-                    )}
-
-                    {item.status === 'ready' && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Aman Diunggah</span>
-                      </span>
-                    )}
-
-                    {item.status === 'duplicate_found' && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                        <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Duplikat Terdeteksi</span>
-                      </span>
-                    )}
-
-                    {item.status === 'invalid_format' && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-rose-50 text-rose-700 border border-rose-200">
-                        <FileWarning className="w-3.5 h-3.5 text-rose-600" />
-                        <span>Bukan 5-Digit PNG</span>
-                      </span>
-                    )}
-
-                    {item.status === 'uploading' && (
-                      <div className="flex items-center gap-2">
-                        <div className="w-24 bg-slate-200 rounded-full h-2 overflow-hidden">
-                          <div
-                            className={`h-2 transition-all duration-200 rounded-full ${
-                              isAio ? 'bg-indigo-600' : 'bg-emerald-600'
-                            }`}
-                            style={{ width: `${item.uploadProgress}%` }}
-                          />
-                        </div>
-                        <span className="text-xs font-mono font-bold text-slate-800">
-                          {item.uploadProgress}%
-                        </span>
+                {/* DUPLICATE NOTIFICATION BANNER */}
+                {item.status === 'duplicate_found' && (
+                  <div className="mt-3 p-3.5 bg-amber-100/90 border border-amber-400 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
+                    <div className="flex items-start gap-2.5">
+                      <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold text-sm text-amber-900">
+                          File sudah pernah di-upload / memiliki nama yang sama!
+                        </p>
+                        <p className="text-amber-800 mt-0.5">
+                          File bernama <span className="font-mono font-bold bg-white/70 px-1 py-0.5 rounded border border-amber-300">{item.file.name}</span> sudah terdaftar di folder Google Drive <strong>{targetConfig.name}</strong>.
+                          {item.existingFile?.createdTime && (
+                            <span className="block sm:inline sm:ml-1 text-slate-700">
+                              (Diunggah pada: {new Date(item.existingFile.createdTime).toLocaleString('id-ID')})
+                            </span>
+                          )}
+                        </p>
                       </div>
-                    )}
+                    </div>
 
-                    {item.status === 'success' && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                        <span>Tersimpan di Drive</span>
-                      </span>
-                    )}
-
-                    {item.status === 'error' && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-red-50 text-red-700 border border-red-200">
-                        <XCircle className="w-3.5 h-3.5 text-red-600" />
-                        <span>Gagal Upload</span>
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Individual Actions */}
-                  <div className="flex items-center gap-1">
-                    {item.status === 'ready' && !isUploadingAny && (
-                      <button
-                        onClick={() => onUploadSingle(item)}
-                        className={`px-3 py-1 text-xs font-bold text-white rounded-lg transition-colors cursor-pointer shadow-xs ${
-                          isAio
-                            ? 'bg-indigo-600 hover:bg-indigo-700'
-                            : 'bg-emerald-600 hover:bg-emerald-700'
-                        }`}
-                        title="Unggah file ini sekarang"
-                      >
-                        Unggah
-                      </button>
-                    )}
-
-                    {item.status === 'duplicate_found' && (
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                      {item.existingFile?.webViewLink && (
+                        <a
+                          href={item.existingFile.webViewLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white text-amber-950 border border-amber-300 font-semibold hover:bg-amber-50 text-xs shadow-2xs"
+                        >
+                          <span>Tinjau di Drive</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
                       <button
                         onClick={() => onRequestOverwrite(item)}
-                        className="px-2.5 py-1 text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 rounded-lg transition-colors shadow-xs cursor-pointer"
-                        title="Buka pilihan replace gambar atau cancel"
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 text-xs shadow-2xs cursor-pointer"
                       >
-                        Replace / Cancel
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Replace / Cancel</span>
                       </button>
-                    )}
-
-                    {item.status === 'success' && item.uploadedDriveUrl && (
-                      <a
-                        href={item.uploadedDriveUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-slate-100 text-slate-700 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
-                        title="Buka file di Google Drive"
-                      >
-                        <span>Buka</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
-
-                    {item.status === 'error' && (
                       <button
-                        onClick={() => onRecheckDuplicate(item.id)}
-                        className="p-1 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-slate-100 transition-colors"
-                        title="Coba lagi"
+                        onClick={() => startEditing(item)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-800 text-white font-semibold hover:bg-amber-900 text-xs shadow-2xs cursor-pointer"
                       >
-                        <RefreshCw className="w-4 h-4" />
+                        <Edit2 className="w-3 h-3" />
+                        <span>Ganti Nama</span>
                       </button>
-                    )}
-
-                    {item.status !== 'uploading' && (
-                      <button
-                        onClick={() => onRemoveItem(item.id)}
-                        className="p-1 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors"
-                        title="Hapus dari antrean"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* RATIO MISMATCH GUIDANCE BANNER */}
-              {isRatioMismatch && ratioInfo && (
-                <div className="mt-3 p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-bold text-amber-950">
-                        Peringatan Acuan Rasio Gambar:
-                      </p>
-                      <p className="text-amber-800 mt-0.5">
-                        {ratioInfo.warningMessage}
-                      </p>
                     </div>
                   </div>
+                )}
 
-                  {/* Quick Category Switch Button */}
-                  {ratioInfo.suggestedCategory && (
-                    <button
-                      onClick={() => {
-                        if (onMoveItemToCategory && ratioInfo.suggestedCategory) {
-                          onMoveItemToCategory(item.id, ratioInfo.suggestedCategory);
-                        } else if (ratioInfo.suggestedCategory) {
-                          onSwitchCategory(ratioInfo.suggestedCategory);
-                        }
-                      }}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white shadow-2xs shrink-0 cursor-pointer ${
-                        ratioInfo.suggestedCategory === 'aio'
-                          ? 'bg-indigo-600 hover:bg-indigo-700'
-                          : 'bg-emerald-600 hover:bg-emerald-700'
-                      }`}
-                    >
-                      <ArrowRightLeft className="w-3.5 h-3.5" />
-                      <span>Pindah File ke {TARGET_FOLDERS[ratioInfo.suggestedCategory].name}</span>
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* DUPLICATE NOTIFICATION BANNER */}
-              {item.status === 'duplicate_found' && (
-                <div className="mt-3 p-3.5 bg-amber-100/90 border border-amber-400 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
-                  <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-bold text-sm text-amber-900">
-                        Notifikasi: File sudah pernah di-upload / memiliki nama yang sama!
-                      </p>
-                      <p className="text-amber-800 mt-0.5">
-                        File bernama <span className="font-mono font-bold bg-white/70 px-1 py-0.5 rounded border border-amber-300">{item.file.name}</span> sudah terdaftar di folder Google Drive <strong>{targetConfig.name}</strong>.
-                        {item.existingFile?.createdTime && (
-                          <span className="block sm:inline sm:ml-1 text-slate-700">
-                            (Diunggah pada: {new Date(item.existingFile.createdTime).toLocaleString('id-ID')})
-                          </span>
-                        )}
-                      </p>
+                {/* INVALID FORMAT NOTIFICATION */}
+                {item.status === 'invalid_format' && item.statusMessage && (
+                  <div className="mt-3 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <XCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-semibold">{item.statusMessage}</p>
+                        <p className="text-rose-600 mt-0.5">
+                          Nama file harus terdiri dari tepat 5 digit angka PNG (contoh: <span className="font-mono font-bold">11321.png</span>).
+                        </p>
+                      </div>
                     </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
-                    {item.existingFile?.webViewLink && (
-                      <a
-                        href={item.existingFile.webViewLink}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white text-amber-950 border border-amber-300 font-semibold hover:bg-amber-50 text-xs shadow-2xs"
-                      >
-                        <span>Tinjau di Drive</span>
-                        <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
-                    <button
-                      onClick={() => onRequestOverwrite(item)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 text-xs shadow-2xs cursor-pointer"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                      <span>Replace / Cancel</span>
-                    </button>
                     <button
                       onClick={() => startEditing(item)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-800 text-white font-semibold hover:bg-amber-900 text-xs shadow-2xs"
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 text-xs shadow-2xs cursor-pointer"
                     >
-                      <Edit2 className="w-3 h-3" />
-                      <span>Ganti Nama</span>
+                      Ubah Nama
                     </button>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* INVALID FORMAT NOTIFICATION */}
-              {item.status === 'invalid_format' && item.statusMessage && (
-                <div className="mt-3 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800 flex items-start justify-between gap-2">
-                  <div className="flex items-start gap-2">
-                    <XCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-semibold">{item.statusMessage}</p>
-                      <p className="text-rose-600 mt-0.5">
-                        Nama file harus terdiri dari tepat 5 digit angka (contoh: <span className="font-mono font-bold">11321.png</span>).
-                      </p>
+                {/* ERROR NOTIFICATION */}
+                {item.status === 'error' && item.error && (
+                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-start justify-between gap-2">
+                    <div className="flex items-start gap-2">
+                      <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-semibold">Gagal Mengunggah:</p>
+                        <p className="text-red-700 mt-0.5">{item.error}</p>
+                      </div>
                     </div>
+                    <button
+                      onClick={() => onRecheckDuplicate(item.id)}
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 text-xs cursor-pointer"
+                    >
+                      Coba Lagi
+                    </button>
                   </div>
-                  <button
-                    onClick={() => startEditing(item)}
-                    className="shrink-0 px-2.5 py-1 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 text-xs shadow-2xs"
-                  >
-                    Ubah Nama Sekarang
-                  </button>
-                </div>
-              )}
-
-              {/* ERROR NOTIFICATION */}
-              {item.status === 'error' && item.error && (
-                <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-start justify-between gap-2">
-                  <div className="flex items-start gap-2">
-                    <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                    <div>
-                      <p className="font-semibold">Gagal Mengunggah:</p>
-                      <p className="text-red-700 mt-0.5">{item.error}</p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => onRecheckDuplicate(item.id)}
-                    className="shrink-0 px-2.5 py-1 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 text-xs"
-                  >
-                    Coba Lagi
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })}
+                )}
+              </div>
+            );
+          })
+        )}
       </div>
     </div>
   );

@@ -38,6 +38,8 @@ export interface DriveFileInfo {
   thumbnailLink?: string;
   createdTime?: string;
   modifiedTime?: string;
+  duplicateCount?: number;
+  allMatches?: DriveFileInfo[];
 }
 
 export type FileValidationStatus =
