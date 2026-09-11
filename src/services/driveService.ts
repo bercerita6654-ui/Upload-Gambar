@@ -273,41 +273,63 @@ export function replaceExistingFileInDrive(
 }
 
 /**
- * Lists files in the target folder for browsing and instant verification.
+ * Lists all files in the target folder for browsing and instant verification.
+ * Automatically pages through nextPageToken using pageSize=1000 so that 100% of data is loaded without truncation.
  */
 export async function listFolderFiles(
   folderId: string,
-  token: string
+  token: string,
+  onProgress?: (loadedCount: number) => void
 ): Promise<DriveFileInfo[]> {
   const query = `'${folderId}' in parents and trashed = false`;
-  const url = new URL('https://www.googleapis.com/drive/v3/files');
-  url.searchParams.set('q', query);
-  url.searchParams.set('orderBy', 'createdTime desc');
-  url.searchParams.set('pageSize', '250');
-  url.searchParams.set(
-    'fields',
-    'files(id, name, mimeType, size, webViewLink, webContentLink, createdTime, modifiedTime, thumbnailLink)'
-  );
-  url.searchParams.set('supportsAllDrives', 'true');
-  url.searchParams.set('includeItemsFromAllDrives', 'true');
+  const allFiles: DriveFileInfo[] = [];
+  let pageToken: string | null = null;
+  let pageCount = 0;
+  const maxPages = 20; // safety boundary (up to 20,000 files)
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-    },
-  });
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error('Sesi login Google kedaluwarsa. Silakan masuk kembali.');
+  do {
+    const url = new URL('https://www.googleapis.com/drive/v3/files');
+    url.searchParams.set('q', query);
+    url.searchParams.set('orderBy', 'createdTime desc');
+    url.searchParams.set('pageSize', '1000');
+    url.searchParams.set(
+      'fields',
+      'nextPageToken, files(id, name, mimeType, size, webViewLink, webContentLink, createdTime, modifiedTime, thumbnailLink)'
+    );
+    url.searchParams.set('supportsAllDrives', 'true');
+    url.searchParams.set('includeItemsFromAllDrives', 'true');
+    if (pageToken) {
+      url.searchParams.set('pageToken', pageToken);
     }
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData?.error?.message || `Gagal memuat daftar file (${response.status})`);
-  }
 
-  const data = await response.json();
-  return (data.files || []) as DriveFileInfo[];
+    const response = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error('Sesi login Google kedaluwarsa. Silakan masuk kembali.');
+      }
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData?.error?.message || `Gagal memuat daftar file (${response.status})`);
+    }
+
+    const data = await response.json();
+    const batch = (data.files || []) as DriveFileInfo[];
+    allFiles.push(...batch);
+
+    if (onProgress) {
+      onProgress(allFiles.length);
+    }
+
+    pageToken = data.nextPageToken || null;
+    pageCount++;
+  } while (pageToken && pageCount < maxPages);
+
+  return allFiles;
 }
 
 /**

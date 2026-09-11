@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { DriveFileInfo, FolderCategory } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
 import { SyncDriveButton } from './SyncDriveButton';
@@ -14,6 +14,10 @@ import {
   AlertTriangle,
   Trash2,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
 } from 'lucide-react';
 
 interface DriveFolderBrowserProps {
@@ -43,8 +47,18 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [filterDuplicatesOnly, setFilterDuplicatesOnly] = useState(false);
   const [isDeletingId, setIsDeletingId] = useState<string | null>(null);
+
+  // Pagination states: options 20, 30, 50
+  const [pageSize, setPageSize] = useState<number>(30);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+
   const targetConfig = TARGET_FOLDERS[category];
   const isAio = category === 'aio';
+
+  // Reset to first page when folder category, search term, duplicate filter, or page size changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [category, searchTerm, filterDuplicatesOnly, pageSize]);
 
   // Group files by normalized name to detect duplicates already inside Drive
   const duplicateNameMap = useMemo(() => {
@@ -83,6 +97,17 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
       return true;
     });
   }, [files, searchTerm, filterDuplicatesOnly, duplicateNameMap]);
+
+  // Total and paginated calculations
+  const totalItems = filteredFiles.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const validCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const startIndex = (validCurrentPage - 1) * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, totalItems);
+
+  const paginatedFiles = useMemo(() => {
+    return filteredFiles.slice(startIndex, endIndex);
+  }, [filteredFiles, startIndex, endIndex]);
 
   const formatFileSize = (bytesStr?: string) => {
     if (!bytesStr) return '-';
@@ -211,7 +236,12 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              File tersimpan di Google Drive ({files.length} file termuat)
+              Total {files.length} file di Google Drive
+              {filteredFiles.length > 0 && (
+                <span className="font-semibold text-slate-700 ml-1.5">
+                  • Menampilkan {startIndex + 1}–{endIndex} dari {totalItems} file
+                </span>
+              )}
               {duplicateGroups.length > 0 && (
                 <span className="ml-1.5 font-bold text-amber-600">
                   • ⚠️ {duplicateGroups.length} file ganda terdeteksi
@@ -337,8 +367,8 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-80 overflow-y-auto pr-1">
-          {filteredFiles.map((file) => {
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-96 overflow-y-auto pr-1">
+          {paginatedFiles.map((file) => {
             const key = file.name.toLowerCase().trim();
             const sameNameFiles = duplicateNameMap.get(key) || [];
             const isDuplicateInDrive = sameNameFiles.length > 1;
@@ -410,7 +440,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
                     <button
                       onClick={() => handleDeleteFile(file)}
                       disabled={isDeletingId === file.id}
-                      className="p-1.5 rounded-md text-amber-700 hover:text-red-700 hover:bg-red-50 transition-colors"
+                      className="p-1.5 rounded-md text-amber-700 hover:text-red-700 hover:bg-red-50 transition-colors cursor-pointer"
                       title="Hapus file duplikat ini dari Google Drive"
                     >
                       {isDeletingId === file.id ? (
@@ -436,6 +466,85 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Paginasi Next & Prev (20, 30, 50 data per halaman) */}
+      {!isLoading && filteredFiles.length > 0 && (
+        <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+          {/* Pilihan jumlah data per halaman */}
+          <div className="flex items-center gap-2 text-slate-600">
+            <span className="text-slate-500 text-[11px] font-medium">Per halaman:</span>
+            <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+              {[20, 30, 50].map((size) => (
+                <button
+                  key={size}
+                  onClick={() => setPageSize(size)}
+                  className={`px-2.5 py-1 text-xs rounded-md transition-all cursor-pointer ${
+                    pageSize === size
+                      ? 'bg-white text-slate-900 shadow-2xs font-bold'
+                      : 'text-slate-500 hover:text-slate-800'
+                  }`}
+                >
+                  {size}
+                </button>
+              ))}
+            </div>
+            <span className="text-[11px] text-slate-400 font-mono hidden sm:inline">
+              (Baris {startIndex + 1}–{endIndex} dari {totalItems})
+            </span>
+          </div>
+
+          {/* Kontrol Navigasi Prev / Next & Indikator Halaman */}
+          <div className="flex items-center gap-1.5">
+            {totalPages > 3 && (
+              <button
+                onClick={() => setCurrentPage(1)}
+                disabled={validCurrentPage <= 1}
+                className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-2xs"
+                title="Halaman Pertama (Hal 1)"
+              >
+                <ChevronsLeft className="w-4 h-4" />
+              </button>
+            )}
+
+            <button
+              onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+              disabled={validCurrentPage <= 1}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold hover:bg-slate-50 hover:text-slate-900 disabled:opacity-35 disabled:cursor-not-allowed transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
+              title="Halaman Sebelumnya"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+              <span>Prev</span>
+            </button>
+
+            <div className="px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-200 font-mono text-xs font-bold text-slate-800">
+              <span>{validCurrentPage}</span>
+              <span className="text-slate-400 font-normal mx-1">/</span>
+              <span className="text-slate-500 font-medium">{totalPages}</span>
+            </div>
+
+            <button
+              onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+              disabled={validCurrentPage >= totalPages}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold hover:bg-slate-50 hover:text-slate-900 disabled:opacity-35 disabled:cursor-not-allowed transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
+              title="Halaman Selanjutnya"
+            >
+              <span>Next</span>
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+
+            {totalPages > 3 && (
+              <button
+                onClick={() => setCurrentPage(totalPages)}
+                disabled={validCurrentPage >= totalPages}
+                className="p-1.5 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer shadow-2xs"
+                title={`Halaman Terakhir (Hal ${totalPages})`}
+              >
+                <ChevronsRight className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

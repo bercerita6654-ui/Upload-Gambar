@@ -9,6 +9,8 @@ import {
   Check,
   HardDrive,
   FileImage,
+  ZoomIn,
+  Maximize2,
 } from 'lucide-react';
 
 interface ReplaceOrCancelModalProps {
@@ -32,15 +34,37 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [newName, setNewName] = useState('');
+  const [expandedImage, setExpandedImage] = useState<'local' | 'drive' | null>(null);
 
   useEffect(() => {
     if (item) {
       setNewName(item.file.name);
       setIsRenaming(false);
+      setExpandedImage(null);
     }
   }, [item]);
 
+  // Handle Escape key to close expanded image lightbox
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && expandedImage) {
+        setExpandedImage(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [expandedImage]);
+
   if (!isOpen || !item) return null;
+
+  // Helper to load high-res thumbnail from Google Drive CDN
+  const getHighResDriveThumbnail = (thumbnailLink?: string) => {
+    if (!thumbnailLink) return undefined;
+    if (thumbnailLink.includes('=s')) {
+      return thumbnailLink.replace(/=s\d+.*$/, '=s1600');
+    }
+    return thumbnailLink;
+  };
 
   const handleSaveRename = () => {
     let clean = newName.trim();
@@ -115,15 +139,32 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
         <div className="grid grid-cols-2 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs">
           {/* New file to be uploaded */}
           <div className="space-y-2 border-r border-slate-200 pr-2">
-            <span className="font-bold text-[11px] uppercase tracking-wider text-slate-500 block">
-              Gambar Baru (Lokal):
-            </span>
-            <div className="w-full h-24 rounded-lg bg-slate-200 overflow-hidden flex items-center justify-center border border-slate-300">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-[11px] uppercase tracking-wider text-slate-500 block">
+                Gambar Baru (Lokal):
+              </span>
+              <span className="text-[10px] text-blue-600 font-semibold cursor-pointer hover:underline" onClick={() => setExpandedImage('local')}>
+                🔍 Perbesar
+              </span>
+            </div>
+            <div
+              onClick={() => setExpandedImage('local')}
+              className="group relative w-full h-28 rounded-xl bg-slate-200 overflow-hidden flex items-center justify-center border border-slate-300 cursor-pointer shadow-2xs hover:border-blue-500 transition-all"
+              title="Klik untuk perbesar gambar lokal secara luas dan full"
+            >
               <img
                 src={item.previewUrl}
                 alt="Preview baru"
-                className="w-full h-full object-cover"
+                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
               />
+              <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white gap-1 backdrop-blur-2xs">
+                <ZoomIn className="w-5 h-5 text-white drop-shadow-md" />
+                <span className="text-[10px] font-bold bg-black/60 px-2 py-0.5 rounded-full shadow-xs">Perbesar Gambar</span>
+              </div>
+              <div className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded backdrop-blur-xs flex items-center gap-1">
+                <Maximize2 className="w-2.5 h-2.5" />
+                <span>Full</span>
+              </div>
             </div>
             <div className="space-y-0.5 text-[11px] text-slate-600">
               <p className="font-mono truncate font-bold text-slate-900">{item.file.name}</p>
@@ -138,17 +179,52 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
 
           {/* Existing file on Google Drive */}
           <div className="space-y-2 pl-2">
-            <span className="font-bold text-[11px] uppercase tracking-wider text-amber-800 block">
-              File Lama di Drive:
-            </span>
-            <div className="w-full h-24 rounded-lg bg-amber-50 border border-amber-200 flex flex-col items-center justify-center text-amber-700 p-2 text-center">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-[11px] uppercase tracking-wider text-amber-800 block">
+                File Lama di Drive:
+              </span>
+              {item.existingFile?.thumbnailLink && (
+                <span className="text-[10px] text-amber-700 font-semibold cursor-pointer hover:underline" onClick={() => setExpandedImage('drive')}>
+                  🔍 Perbesar
+                </span>
+              )}
+            </div>
+            <div
+              onClick={() => {
+                if (item.existingFile?.thumbnailLink) {
+                  setExpandedImage('drive');
+                } else if (item.existingFile?.webViewLink) {
+                  window.open(item.existingFile.webViewLink, '_blank');
+                }
+              }}
+              className={`group relative w-full h-28 rounded-xl border flex flex-col items-center justify-center text-center transition-all ${
+                item.existingFile?.thumbnailLink
+                  ? 'bg-amber-50 border-amber-200 cursor-pointer hover:border-amber-500 shadow-2xs overflow-hidden'
+                  : 'bg-amber-50 border-amber-200 text-amber-700 p-2'
+              }`}
+              title={
+                item.existingFile?.thumbnailLink
+                  ? 'Klik untuk perbesar gambar Drive secara luas dan full'
+                  : 'Buka di Google Drive'
+              }
+            >
               {item.existingFile?.thumbnailLink ? (
-                <img
-                  src={item.existingFile.thumbnailLink}
-                  alt="Thumbnail Drive"
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full object-cover rounded"
-                />
+                <>
+                  <img
+                    src={item.existingFile.thumbnailLink}
+                    alt="Thumbnail Drive"
+                    referrerPolicy="no-referrer"
+                    className="w-full h-full object-cover rounded transition-transform duration-300 group-hover:scale-105"
+                  />
+                  <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white gap-1 backdrop-blur-2xs">
+                    <ZoomIn className="w-5 h-5 text-white drop-shadow-md" />
+                    <span className="text-[10px] font-bold bg-black/60 px-2 py-0.5 rounded-full shadow-xs">Perbesar Gambar</span>
+                  </div>
+                  <div className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded backdrop-blur-xs flex items-center gap-1">
+                    <Maximize2 className="w-2.5 h-2.5" />
+                    <span>Full</span>
+                  </div>
+                </>
               ) : (
                 <>
                   <HardDrive className="w-8 h-8 text-amber-600 mb-1" />
@@ -251,6 +327,152 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Fullscreen / Expanded Image Lightbox */}
+      {expandedImage && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-3 sm:p-6 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200"
+          onClick={() => setExpandedImage(null)}
+        >
+          <div
+            className="relative max-w-4xl w-full max-h-[92vh] flex flex-col bg-slate-900 border border-slate-700/70 rounded-2xl shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Lightbox Header with Switcher & Close */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800 bg-slate-900/90 gap-2 flex-wrap">
+              {/* Toggle Switcher between Local and Drive */}
+              <div className="flex items-center gap-1.5 bg-slate-800 p-1 rounded-xl border border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setExpandedImage('local')}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                    expandedImage === 'local'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-blue-400" />
+                  <span>Gambar Baru (Lokal)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setExpandedImage('drive')}
+                  disabled={!item.existingFile?.thumbnailLink}
+                  className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                    expandedImage === 'drive'
+                      ? 'bg-amber-600 text-white shadow-sm'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-700'
+                  }`}
+                >
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  <span>File Lama di Drive</span>
+                </button>
+              </div>
+
+              {/* Close button */}
+              <button
+                type="button"
+                onClick={() => setExpandedImage(null)}
+                className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                title="Tutup (Esc)"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Lightbox Image Stage */}
+            <div className="flex-1 flex items-center justify-center p-4 min-h-[300px] max-h-[65vh] overflow-hidden bg-slate-950/60">
+              {expandedImage === 'local' ? (
+                <img
+                  src={item.previewUrl}
+                  alt="Gambar Baru Full"
+                  className="max-h-[60vh] max-w-full w-auto h-auto object-contain rounded-lg shadow-xl border border-slate-800"
+                />
+              ) : item.existingFile?.thumbnailLink ? (
+                <img
+                  src={getHighResDriveThumbnail(item.existingFile.thumbnailLink)}
+                  alt="File Lama Drive Full"
+                  referrerPolicy="no-referrer"
+                  className="max-h-[60vh] max-w-full w-auto h-auto object-contain rounded-lg shadow-xl border border-slate-800"
+                />
+              ) : (
+                <div className="text-center text-slate-400 py-12 space-y-2">
+                  <HardDrive className="w-12 h-12 mx-auto text-amber-500" />
+                  <p className="text-sm">Thumbnail file Google Drive tidak tersedia.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Lightbox Footer Details */}
+            <div className="px-4 py-3 bg-slate-900 border-t border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-slate-300">
+              <div className="space-y-0.5 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-mono font-bold text-white text-sm truncate">
+                    {expandedImage === 'local'
+                      ? item.file.name
+                      : item.existingFile?.name || item.file.name}
+                  </span>
+                  <span
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                      expandedImage === 'local'
+                        ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                        : 'bg-amber-950 text-amber-300 border border-amber-800'
+                    }`}
+                  >
+                    {expandedImage === 'local' ? 'Lokal (Siap Upload)' : 'Tersimpan di Drive'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-slate-400 text-[11px] flex-wrap">
+                  <span>
+                    Ukuran:{' '}
+                    {formatBytes(
+                      expandedImage === 'local' ? item.file.size : item.existingFile?.size
+                    )}
+                  </span>
+                  {expandedImage === 'local' && item.ratioInfo && item.ratioInfo.width > 0 && (
+                    <>
+                      <span>•</span>
+                      <span>
+                        Dimensi: {item.ratioInfo.width}×{item.ratioInfo.height}px ({item.ratioInfo.ratioLabel})
+                      </span>
+                    </>
+                  )}
+                  {expandedImage === 'drive' && item.existingFile?.createdTime && (
+                    <>
+                      <span>•</span>
+                      <span>
+                        Diunggah: {new Date(item.existingFile.createdTime).toLocaleDateString('id-ID')}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {expandedImage === 'drive' && item.existingFile?.webViewLink && (
+                  <a
+                    href={item.existingFile.webViewLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-medium flex items-center gap-1.5 transition-colors border border-slate-700 text-xs"
+                  >
+                    <span>Buka di Google Drive</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setExpandedImage(null)}
+                  className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold transition-colors text-xs cursor-pointer shadow-xs"
+                >
+                  Tutup Preview
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
