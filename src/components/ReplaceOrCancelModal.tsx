@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { UploadQueueItem } from '../types';
+import { lookupProductName } from '../services/productCatalogService';
 import {
   AlertTriangle,
   RefreshCw,
@@ -13,6 +14,7 @@ import {
   Maximize2,
   Trash2,
   Loader2,
+  ShoppingBag,
 } from 'lucide-react';
 
 interface ReplaceOrCancelModalProps {
@@ -25,6 +27,7 @@ interface ReplaceOrCancelModalProps {
   onDeleteExisting?: (item: UploadQueueItem) => void;
   isProcessing?: boolean;
   isDeletingExisting?: boolean;
+  skuMap?: Record<string, string>;
 }
 
 export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
@@ -37,6 +40,7 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
   onDeleteExisting,
   isProcessing = false,
   isDeletingExisting = false,
+  skuMap,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [newName, setNewName] = useState('');
@@ -123,7 +127,7 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
         </div>
 
         {/* Informative message */}
-        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 leading-relaxed space-y-1.5">
+        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-950 leading-relaxed space-y-2">
           <p>
             File dengan nama{' '}
             <strong className="font-mono bg-white px-1.5 py-0.5 rounded border border-amber-300 text-slate-900">
@@ -131,6 +135,25 @@ export const ReplaceOrCancelModal: React.FC<ReplaceOrCancelModalProps> = ({
             </strong>{' '}
             sudah terdeteksi di folder Google Drive <strong>{folderName}</strong>.
           </p>
+
+          {/* Nama Produk dari Sheet STOCK LIST */}
+          {(() => {
+            const productName =
+              item.productName || (skuMap ? lookupProductName(item.file.name, skuMap) : undefined);
+            if (!productName) return null;
+            return (
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-950 font-semibold text-xs">
+                <ShoppingBag className="w-4 h-4 text-indigo-600 shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-[10px] text-indigo-600 uppercase tracking-wider block font-bold">
+                    Produk di Sheet STOCK LIST:
+                  </span>
+                  <span className="text-indigo-900 font-bold">{productName}</span>
+                </div>
+              </div>
+            );
+          })()}
+
           {item.existingFile?.duplicateCount && item.existingFile.duplicateCount > 1 && (
             <div className="p-2 bg-amber-100/70 border border-amber-300 rounded-lg text-amber-900 font-medium text-[11px] flex items-center gap-1.5">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />

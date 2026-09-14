@@ -4,6 +4,7 @@ import {
   FolderCategory,
 } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
+import { lookupProductName } from '../services/productCatalogService';
 import {
   CheckCircle2,
   AlertTriangle,
@@ -39,6 +40,9 @@ interface UploadQueueListProps {
   onClearAll: () => void;
   onToggleCategory?: (id: string) => void;
   isUploadingAny: boolean;
+  isSyncingSheet?: boolean;
+  syncFeedback?: string | null;
+  skuMap?: Record<string, string>;
 }
 
 export const UploadQueueList: React.FC<UploadQueueListProps> = ({
@@ -55,6 +59,9 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
   onClearAll,
   onToggleCategory,
   isUploadingAny,
+  isSyncingSheet = false,
+  syncFeedback = null,
+  skuMap,
 }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editNameValue, setEditNameValue] = useState<string>('');
@@ -154,14 +161,19 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
               id="master-upload-all-button"
               type="button"
               onClick={onUploadAllReady}
-              disabled={isUploadingAny || (uploadableItems.length === 0 && duplicateItems.length === 0)}
+              disabled={isUploadingAny || isSyncingSheet || (uploadableItems.length === 0 && duplicateItems.length === 0)}
               className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-bold text-white rounded-xl shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-indigo-600 via-blue-600 to-emerald-600 hover:from-indigo-700 hover:via-blue-700 hover:to-emerald-700 active:scale-98"
-              title="Klik untuk otomatis proses unggah semua file ke Google Drive"
+              title="Klik untuk otomatis proses unggah semua file ke Google Drive dan langsung sinkronkan ID ke Spreadsheet (1 kali kerja)"
             >
               {isUploadingAny ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
                   <span>Sedang Mengunggah Semua File...</span>
+                </>
+              ) : isSyncingSheet ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin text-emerald-200" />
+                  <span>Menyinkronkan ID ke Sheet...</span>
                 </>
               ) : uploadableItems.length > 0 ? (
                 <>
@@ -181,8 +193,8 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                 </>
               ) : successItems.length > 0 && successItems.length === items.length ? (
                 <>
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Semua File Selesai Diunggah</span>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                  <span>Selesai &amp; ID Tersinkron ke Sheet</span>
                 </>
               ) : (
                 <>
@@ -193,6 +205,29 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Notifikasi Otomatis Sinkronisasi ID Drive ke Sheet (1 Kali Kerja) */}
+        {(isSyncingSheet || syncFeedback) && (
+          <div
+            className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-all ${
+              isSyncingSheet
+                ? 'bg-blue-50/90 border-blue-200 text-blue-800 animate-pulse'
+                : 'bg-emerald-50/90 border-emerald-200 text-emerald-800'
+            }`}
+          >
+            {isSyncingSheet ? (
+              <RefreshCw className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            )}
+            <div className="flex-1 min-w-0">
+              <span className="font-bold">
+                {isSyncingSheet ? 'Otomatisasi 1 Kali Kerja: ' : 'Sinkronisasi ID Otomatis: '}
+              </span>
+              <span>{syncFeedback || 'Menyinkronkan ID Google Drive ke Google Sheet...'}</span>
+            </div>
+          </div>
+        )}
 
         {/* Filter Tabs & Badges Row */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-100">
@@ -342,19 +377,35 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                           </button>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm font-bold text-slate-900 truncate">
-                            {item.file.name}
-                          </span>
-                          {item.status !== 'uploading' && item.status !== 'success' && (
-                            <button
-                              onClick={() => startEditing(item)}
-                              className="text-slate-400 hover:text-blue-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
-                              title="Ubah nama file"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-sm font-bold text-slate-900 truncate">
+                              {item.file.name}
+                            </span>
+                            {item.status !== 'uploading' && item.status !== 'success' && (
+                              <button
+                                onClick={() => startEditing(item)}
+                                className="text-slate-400 hover:text-blue-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
+                                title="Ubah nama file"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Nama Produk dari Sheet STOCK LIST Kolom 3 */}
+                          {(() => {
+                            const productName =
+                              item.productName ||
+                              (skuMap ? lookupProductName(item.file.name, skuMap) : undefined);
+                            if (!productName) return null;
+                            return (
+                              <div className="flex items-center gap-1.5 text-xs text-indigo-900 font-semibold truncate mt-0.5 max-w-md">
+                                <ShoppingBag className="w-3 h-3 text-indigo-600 shrink-0" />
+                                <span className="truncate">{productName}</span>
+                              </div>
+                            );
+                          })()}
                         </div>
                       )}
 

@@ -239,6 +239,287 @@ async function startServer() {
     }
   });
 
+  // Fetch and Parse STOCK LIST rows + sheet "Variasi" from Google Sheets API
+  // Column 1 (index 0) = SKU, Column 3 (index 2) = Nama Produk
+  // Column V (index 21) = Story ID (4:5), Column X (index 23) = AIO ID (1:1)
+  // Sheet "Variasi": Kelompok variasi produk yang berbagi gambar Story (4:5) yang sama
+  app.get('/api/sheet/stock-products', async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader) {
+        return res.status(401).json({ error: 'Token otorisasi diperlukan.' });
+      }
+
+      const spreadsheetId = '1mrD9sQK_Sffa1X1fzlCDmaJXs1Yj2q-XTNdi2sRGPos';
+      const sheetName = 'STOCK LIST';
+
+      // 1. Fetch STOCK LIST A:AZ and Variasi A:Z in parallel or sequence
+      const stockListUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'${encodeURIComponent(
+        sheetName
+      )}'!A:AZ`;
+
+      const variasiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'${encodeURIComponent(
+        'Variasi'
+      )}'!A:Z`;
+
+      const [stockRes, variasiRes] = await Promise.all([
+        fetch(stockListUrl, {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+          },
+        }),
+        fetch(variasiUrl, {
+          headers: {
+            Authorization: authHeader,
+            Accept: 'application/json',
+          },
+        }).catch(() => null),
+      ]);
+
+      if (!stockRes.ok) {
+        const err = await stockRes.json().catch(() => ({}));
+        return res.status(stockRes.status).json({
+          error: err?.error?.message || `Gagal membaca Google Sheet (${stockRes.status})`,
+        });
+      }
+
+      const data = await stockRes.json();
+      const rows: any[][] = data.values || [];
+
+      if (rows.length <= 1) {
+        return res.json({ products: [], total: 0 });
+      }
+
+      // Deteksi indeks kolom berdasarkan header baris ke-1
+      const headerRow = (rows[0] || []).map((h: any) => String(h || '').trim().toLowerCase());
+      
+      // Cari kolom Kategori & Merk
+      let categoryColIdx = headerRow.findIndex(
+        (h: string) => h === 'kategori' || h.includes('kategori') || h === 'category'
+      );
+      let brandColIdx = headerRow.findIndex(
+        (h: string) => h === 'merk' || h === 'merek' || h.includes('merk') || h === 'brand'
+      );
+
+      // Cari kolom Story ID dan AIO ID jika ada di header, atau default ke V (21) dan X (23)
+      let storyColIdx = headerRow.findIndex(
+        (h: string) => (h.includes('story') && (h.includes('id') || h.includes('drive'))) || h === 'id story'
+      );
+      if (storyColIdx === -1) storyColIdx = 21; // Kolom V
+
+      let aioColIdx = headerRow.findIndex(
+        (h: string) => (h.includes('aio') && (h.includes('id') || h.includes('drive'))) || h === 'id aio'
+      );
+      if (aioColIdx === -1) aioColIdx = 23; // Kolom X
+
+      const cleanSku = (val: any): string => {
+        if (!val) return '';
+        let s = String(val).trim();
+        const lastDot = s.lastIndexOf('.');
+        if (lastDot > 0 && lastDot >= s.length - 5) {
+          s = s.substring(0, lastDot);
+        }
+        return s.trim();
+      };
+
+      const isValidId = (val: any): boolean => {
+        if (!val) return false;
+        const s = String(val).trim();
+        return s !== '' && s !== '-' && s !== 'null' && s !== '#N/A' && s !== 'undefined';
+      };
+
+      // 2. Parse sheet "Variasi" jika tersedia
+      // Cari kolom yang bernama "Variasi" (case-insensitive) dan kolom SKU / Kode
+      const variationMap: Record<string, string> = {}; // SKU -> variationGroup
+      const groupToSkus: Record<string, string[]> = {}; // variationGroup -> SKU[]
+
+      if (variasiRes && variasiRes.ok) {
+        try {
+          const varData = await variasiRes.json();
+          const varRows: any[][] = varData.values || [];
+          if (varRows.length > 1) {
+            const header = varRows[0].map((h: any) => String(h || '').trim().toLowerCase());
+            let variasiColIdx = header.findIndex(
+              (h: string) => h === 'variasi' || h.includes('variasi')
+            );
+            let skuColIdx = header.findIndex(
+              (h: string) => h === 'sku' || h.includes('kode') || h === 'id'
+            );
+
+            // Default fallback bila tidak ada header spesifik: Kolom 0 = SKU, Kolom 1 = Variasi
+            if (variasiColIdx === -1) {
+              variasiColIdx = header.length > 1 ? 1 : 0;
+            }
+            if (skuColIdx === -1) {
+              skuColIdx = 0;
+            }
+
+            for (let v = 1; v < varRows.length; v++) {
+              const vRow = varRows[v];
+              const skuVal = cleanSku(vRow[skuColIdx]);
+              const varVal = vRow[variasiColIdx] ? String(vRow[variasiColIdx]).trim() : '';
+
+              if (skuVal && varVal) {
+                variationMap[skuVal] = varVal;
+                // Simpan juga versi angka murni
+                const num = parseInt(skuVal, 10);
+                if (!isNaN(num)) {
+                  variationMap[num.toString()] = varVal;
+                  variationMap[num.toString().padStart(5, '0')] = varVal;
+                }
+
+                if (!groupToSkus[varVal]) {
+                  groupToSkus[varVal] = [];
+                }
+                if (!groupToSkus[varVal].includes(skuVal)) {
+                  groupToSkus[varVal].push(skuVal);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Gagal memproses sheet Variasi:', e);
+        }
+      }
+
+      // 3. Baca semua row STOCK LIST dan kumpulkan direct story IDs
+      const rawProducts: any[] = [];
+      const directStoryBySku: Record<string, { id: string; date: string }> = {};
+
+      for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const rawSku = row[0];
+        const sku = cleanSku(rawSku);
+        if (!sku) continue;
+
+        // Kolom 3 = Index 2 = Nama Produk
+        const productName = (row[2] ? String(row[2]) : '').trim();
+
+        // Kategori & Merk
+        const categoryVal =
+          categoryColIdx !== -1 && row[categoryColIdx] ? String(row[categoryColIdx]).trim() : '';
+        const brandVal =
+          brandColIdx !== -1 && row[brandColIdx] ? String(row[brandColIdx]).trim() : '';
+
+        // Story ID & Date
+        const storyId = row[storyColIdx] ? String(row[storyColIdx]).trim() : '';
+        const storyDate = row[storyColIdx + 1] ? String(row[storyColIdx + 1]).trim() : '';
+
+        // AIO ID & Date
+        const aioId = row[aioColIdx] ? String(row[aioColIdx]).trim() : '';
+        const aioDate = row[aioColIdx + 1] ? String(row[aioColIdx + 1]).trim() : '';
+
+        const hasDirectStory = isValidId(storyId);
+        if (hasDirectStory) {
+          directStoryBySku[sku] = { id: storyId, date: storyDate };
+          const num = parseInt(sku, 10);
+          if (!isNaN(num)) {
+            directStoryBySku[num.toString()] = { id: storyId, date: storyDate };
+            directStoryBySku[num.toString().padStart(5, '0')] = { id: storyId, date: storyDate };
+          }
+        }
+
+        rawProducts.push({
+          rowNumber: i + 1,
+          sku,
+          productName: productName || `Produk SKU ${sku}`,
+          category: categoryVal,
+          brand: brandVal,
+          directStoryId: storyId,
+          directStoryDate: storyDate,
+          aioId,
+          aioDate,
+          hasAio: isValidId(aioId),
+        });
+      }
+
+      // 4. Hubungkan Story ID dari Variasi jika SKU belum memiliki Story ID langsung
+      const products = rawProducts.map((p) => {
+        const varGroup = variationMap[p.sku];
+        const variationSkuList = varGroup ? groupToSkus[varGroup] || [] : undefined;
+
+        let effectiveStoryId = p.directStoryId;
+        let effectiveStoryDate = p.directStoryDate;
+        let storySource: 'direct' | 'variation' = 'direct';
+        let storySharedFromSku: string | undefined = undefined;
+
+        if (isValidId(p.directStoryId)) {
+          storySource = 'direct';
+        } else if (varGroup && variationSkuList && variationSkuList.length > 0) {
+          // Cari apakah ada SKU lain dalam variasi yang sama yang sudah punya Story ID
+          for (const otherSku of variationSkuList) {
+            const found = directStoryBySku[otherSku];
+            if (found && isValidId(found.id)) {
+              effectiveStoryId = found.id;
+              effectiveStoryDate = found.date;
+              storySource = 'variation';
+              storySharedFromSku = otherSku;
+              break;
+            }
+          }
+        }
+
+        const hasStory = isValidId(effectiveStoryId);
+        const hasAio = p.hasAio;
+        const isComplete = hasStory && hasAio;
+
+        let missingCategory: 'both' | 'story' | 'aio' | 'none' = 'none';
+        if (!hasStory && !hasAio) {
+          missingCategory = 'both';
+        } else if (!hasStory) {
+          missingCategory = 'story';
+        } else if (!hasAio) {
+          missingCategory = 'aio';
+        }
+
+        return {
+          rowNumber: p.rowNumber,
+          sku: p.sku,
+          productName: p.productName,
+          category: p.category,
+          brand: p.brand,
+          variationGroup: varGroup,
+          variationSkuList,
+          storyId: effectiveStoryId,
+          storyDate: effectiveStoryDate,
+          aioId: p.aioId,
+          aioDate: p.aioDate,
+          hasStory,
+          hasAio,
+          isComplete,
+          missingCategory,
+          storySource: hasStory ? storySource : undefined,
+          storySharedFromSku,
+        };
+      });
+
+      // Kumpulkan daftar opsi Brand dan Kategori unik
+      const categoriesSet = new Set<string>();
+      const brandsSet = new Set<string>();
+      products.forEach((p) => {
+        if (p.category) categoriesSet.add(p.category);
+        if (p.brand) brandsSet.add(p.brand);
+      });
+
+      return res.json({
+        products,
+        total: products.length,
+        completeCount: products.filter((p) => p.isComplete).length,
+        missingAioCount: products.filter((p) => !p.hasAio).length,
+        missingStoryCount: products.filter((p) => !p.hasStory).length,
+        missingBothCount: products.filter((p) => !p.hasAio && !p.hasStory).length,
+        hasVariationSheet: !!(variasiRes && variasiRes.ok),
+        variationGroupCount: Object.keys(groupToSkus).length,
+        availableCategories: Array.from(categoriesSet).sort(),
+        availableBrands: Array.from(brandsSet).sort(),
+      });
+    } catch (err: any) {
+      console.error('Error fetching stock products:', err);
+      return res.status(500).json({ error: err.message || 'Gagal memproses data produk.' });
+    }
+  });
+
   // Proxy upload to Google Drive API (Bypasses all browser CORS restrictions)
   app.post('/api/drive/upload', rawBodyParser, async (req, res) => {
     try {

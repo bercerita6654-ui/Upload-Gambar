@@ -65,4 +65,27 @@ export interface UploadQueueItem {
   uploadedDriveUrl?: string;
   uploadedFileId?: string;
   error?: string;
+  productName?: string;
 }
+
+export interface StockProduct {
+  rowNumber: number;
+  sku: string;
+  productName: string;
+  category?: string;
+  brand?: string;
+  variationGroup?: string;
+  variationSkuList?: string[];
+  storyId?: string;
+  storyDate?: string;
+  aioId?: string;
+  aioDate?: string;
+  hasStory: boolean;
+  hasAio: boolean;
+  isComplete: boolean;
+  missingCategory: 'both' | 'story' | 'aio' | 'none';
+  storySource?: 'direct' | 'variation';
+  storySharedFromSku?: string;
+}
+
+export type MissionFilter = 'all' | 'missing_both' | 'missing_aio' | 'missing_story' | 'complete';

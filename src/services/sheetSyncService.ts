@@ -323,19 +323,31 @@ export async function executeDirectSpreadsheetSync(
     });
   }
 
-  // 2. Fetch current rows from Google Spreadsheet (Column A:A, and current V:Y to preserve existing data)
-  if (onProgress) onProgress(`Membaca data Sheet '${sheetName}'...`, 50);
+  // 2. Fetch current rows from Google Spreadsheet (STOCK LIST and Variasi)
+  if (onProgress) onProgress(`Membaca data Sheet '${sheetName}' & 'Variasi'...`, 50);
 
   const getSheetUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'${encodeURIComponent(
     sheetName
   )}'!A:Y`;
 
-  const getRes = await fetch(getSheetUrl, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
-    },
-  });
+  const getVariasiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'${encodeURIComponent(
+    'Variasi'
+  )}'!A:Z`;
+
+  const [getRes, getVariasiRes] = await Promise.all([
+    fetch(getSheetUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    }),
+    fetch(getVariasiUrl, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    }).catch(() => null),
+  ]);
 
   if (!getRes.ok) {
     const errObj = await getRes.json().catch(() => ({}));
@@ -352,6 +364,44 @@ export async function executeDirectSpreadsheetSync(
     throw new Error(`Sheet '${sheetName}' tidak memiliki baris data produk untuk disinkronkan.`);
   }
 
+  // Parse variation map: SKU -> Variasi, and Variasi -> SKU[]
+  const variationMap: Record<string, string> = {};
+  const groupToSkus: Record<string, string[]> = {};
+
+  if (getVariasiRes && getVariasiRes.ok) {
+    try {
+      const varData = await getVariasiRes.json();
+      const varRows: unknown[][] = varData.values || [];
+      if (varRows.length > 1) {
+        const header = (varRows[0] || []).map((h) => String(h || '').trim().toLowerCase());
+        let variasiColIdx = header.findIndex((h) => h === 'variasi' || h.includes('variasi'));
+        let skuColIdx = header.findIndex((h) => h === 'sku' || h.includes('kode') || h === 'id');
+
+        if (variasiColIdx === -1) variasiColIdx = header.length > 1 ? 1 : 0;
+        if (skuColIdx === -1) skuColIdx = 0;
+
+        for (let v = 1; v < varRows.length; v++) {
+          const vRow = varRows[v];
+          const skuVal = cleanSkuKey(vRow[skuColIdx]);
+          const varVal = vRow[variasiColIdx] ? String(vRow[variasiColIdx]).trim() : '';
+
+          if (skuVal && varVal) {
+            variationMap[skuVal] = varVal;
+            const num = parseInt(skuVal, 10);
+            if (!isNaN(num)) {
+              variationMap[num.toString()] = varVal;
+              variationMap[num.toString().padStart(5, '0')] = varVal;
+            }
+            if (!groupToSkus[varVal]) groupToSkus[varVal] = [];
+            if (!groupToSkus[varVal].includes(skuVal)) groupToSkus[varVal].push(skuVal);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Gagal membaca sheet Variasi saat sinkronisasi:', e);
+    }
+  }
+
   const totalDataRows = rows.length - 1; // excluding header
   const storyUpdates: string[][] = [];
   const aioUpdates: string[][] = [];
@@ -359,7 +409,7 @@ export async function executeDirectSpreadsheetSync(
   let storyMatchCount = 0;
   let aioMatchCount = 0;
 
-  if (onProgress) onProgress('Mencocokkan SKU dengan ID File Drive...', 70);
+  if (onProgress) onProgress('Mencocokkan SKU & Variasi dengan ID File Drive...', 70);
 
   // Loop starting from row index 1 (Row 2 in sheet)
   for (let i = 1; i < rows.length; i++) {
@@ -376,15 +426,35 @@ export async function executeDirectSpreadsheetSync(
     const existingAioId = (row[23] as string) || '';
     const existingAioDate = (row[24] as string) || '';
 
-    // Story match
+    // Story match: Periksa file Drive langsung dengan nama SKU, atau via variasi produk yang sama
     if (mode === 'story' || mode === 'all') {
       const num = parseInt(skuKey, 10);
-      const match = skuKey
+      let match = skuKey
         ? (storyFileMap[skuKey] ||
             (!isNaN(num)
               ? storyFileMap[num.toString()] || storyFileMap[num.toString().padStart(5, '0')]
               : null))
         : null;
+
+      // Jika tidak ada foto story langsung dengan nama SKU ini, cari apakah ada SKU lain dalam variasi yang sama yang sudah punya file
+      if (!match && skuKey && variationMap[skuKey]) {
+        const varGroup = variationMap[skuKey];
+        const peerSkus = groupToSkus[varGroup] || [];
+        for (const peer of peerSkus) {
+          if (peer !== skuKey) {
+            const peerNum = parseInt(peer, 10);
+            const peerMatch =
+              storyFileMap[peer] ||
+              (!isNaN(peerNum)
+                ? storyFileMap[peerNum.toString()] || storyFileMap[peerNum.toString().padStart(5, '0')]
+                : null);
+            if (peerMatch) {
+              match = peerMatch;
+              break;
+            }
+          }
+        }
+      }
 
       if (match) {
         storyUpdates.push([match.id, formatSyncTimestamp(match.createdTime)]);

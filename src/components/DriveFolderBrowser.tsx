@@ -3,6 +3,7 @@ import { DriveFileInfo, FolderCategory } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
 import { SyncDriveButton } from './SyncDriveButton';
 import { deleteDriveFile } from '../services/driveService';
+import { lookupProductName } from '../services/productCatalogService';
 import {
   Boxes,
   ShoppingBag,
@@ -32,6 +33,7 @@ interface DriveFolderBrowserProps {
   token?: string | null;
   onRefresh: () => void;
   onShowToast?: (type: 'success' | 'error' | 'info' | 'warning', title: string, message: string) => void;
+  skuMap?: Record<string, string>;
 }
 
 export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
@@ -43,6 +45,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
   token,
   onRefresh,
   onShowToast,
+  skuMap,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterDuplicatesOnly, setFilterDuplicatesOnly] = useState(false);
@@ -95,7 +98,13 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
 
   const filteredFiles = useMemo(() => {
     return files.filter((f) => {
-      const matchesSearch = f.name.toLowerCase().includes(searchTerm.toLowerCase().trim());
+      const term = searchTerm.toLowerCase().trim();
+      const productName = skuMap ? lookupProductName(f.name, skuMap) : undefined;
+      const matchesSearch =
+        !term ||
+        f.name.toLowerCase().includes(term) ||
+        (productName && productName.toLowerCase().includes(term));
+
       if (!matchesSearch) return false;
 
       if (filterDuplicatesOnly) {
@@ -106,7 +115,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
 
       return true;
     });
-  }, [files, searchTerm, filterDuplicatesOnly, duplicateNameMap]);
+  }, [files, searchTerm, filterDuplicatesOnly, duplicateNameMap, skuMap]);
 
   // Total and paginated calculations
   const totalItems = filteredFiles.length;
@@ -521,6 +530,16 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
                         </span>
                       )}
                     </div>
+                    {/* Nama Produk dari Sheet STOCK LIST Kolom 3 */}
+                    {(() => {
+                      const productName = skuMap ? lookupProductName(file.name, skuMap) : undefined;
+                      if (!productName) return null;
+                      return (
+                        <p className="text-[11px] font-semibold text-indigo-700 truncate max-w-[200px] sm:max-w-xs">
+                          {productName}
+                        </p>
+                      );
+                    })()}
                     <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
                       <span>{formatFileSize(file.size)}</span>
                       {file.createdTime && (
