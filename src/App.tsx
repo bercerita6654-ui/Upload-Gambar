@@ -439,25 +439,49 @@ export default function App() {
     }
   };
 
-  // Single Upload execution
-  const executeUploadItem = async (item: UploadQueueItem): Promise<boolean> => {
-    let currentToken = token;
+  // Single Upload execution with token reuse and duplicate handling options
+  const executeUploadItem = async (
+    item: UploadQueueItem,
+    explicitToken?: string,
+    options?: { silentDuplicate?: boolean }
+  ): Promise<{ success: boolean; isDuplicate?: boolean; duplicateItem?: UploadQueueItem }> => {
+    let currentToken = explicitToken || token;
     if (!currentToken) {
       try {
         const loginRes = await googleSignIn();
-        if (!loginRes) return false;
+        if (!loginRes) return { success: false };
         currentToken = loginRes.accessToken;
         setToken(loginRes.accessToken);
         setUser(loginRes.user);
       } catch (err: unknown) {
         const errObj = err as { message?: string };
         showToast('error', 'Login Diperlukan', errObj.message || 'Silakan masuk ke Google');
-        return false;
+        return { success: false };
       }
     }
 
     const targetCategory = item.category || 'aio';
     const targetFolderId = TARGET_FOLDERS[targetCategory].folderId;
+
+    // Validate 5-digit .png format first
+    const validation = validatePngFileName(item.file.name);
+    if (!validation.isValid) {
+      setQueue((prev) =>
+        prev.map((i) =>
+          i.id === item.id
+            ? {
+                ...i,
+                status: 'invalid_format',
+                statusMessage: validation.message,
+              }
+            : i
+        )
+      );
+      if (!options?.silentDuplicate) {
+        showToast('error', 'Format Nama File Tidak Sesuai', validation.message || 'Nama file tidak valid.');
+      }
+      return { success: false };
+    }
 
     // 🛑 REAL-TIME PRE-UPLOAD GUARD:
     // Check if the file ALREADY exists in Google Drive right now before uploading!
@@ -479,13 +503,15 @@ export default function App() {
         };
 
         setQueue((prev) => prev.map((i) => (i.id === item.id ? duplicateItem : i)));
-        setDuplicateModalItem(duplicateItem);
-        showToast(
-          'warning',
-          'Duplikat Terdeteksi!',
-          `Upload file ${item.file.name} otomatis dicegah agar tidak membuat file ganda di Google Drive.`
-        );
-        return false;
+        if (!options?.silentDuplicate) {
+          setDuplicateModalItem(duplicateItem);
+          showToast(
+            'warning',
+            'Duplikat Terdeteksi!',
+            `Upload file ${item.file.name} otomatis dicegah agar tidak membuat file ganda di Google Drive.`
+          );
+        }
+        return { success: false, isDuplicate: true, duplicateItem };
       }
     } catch (checkErr) {
       console.warn('Pre-upload duplicate check error:', checkErr);
@@ -524,7 +550,7 @@ export default function App() {
 
       // Refresh folder cache
       fetchFolderContent(targetCategory, currentToken);
-      return true;
+      return { success: true };
     } catch (err: unknown) {
       const errObj = err as { message?: string };
       setQueue((prev) =>
@@ -538,7 +564,7 @@ export default function App() {
             : i
         )
       );
-      return false;
+      return { success: false };
     }
   };
 
@@ -550,26 +576,87 @@ export default function App() {
     setIsUploadingAny(false);
   };
 
-  // Upload All Ready Files in sequence (MASTER SMART UPLOAD)
+  // Upload All Ready and Pending Files in sequence (MASTER SMART UPLOAD)
   const handleUploadAllReady = async () => {
     if (isUploadingAny) return;
-    const readyItems = queue.filter((i) => i.status === 'ready');
-    if (readyItems.length === 0) return;
+
+    // 1. Gather all uploadable items (ready, error retry, or pending checking)
+    const candidateItems = queue.filter(
+      (i) => i.status === 'ready' || i.status === 'error' || i.status === 'checking_drive'
+    );
+
+    if (candidateItems.length === 0) {
+      const duplicateOnly = queue.filter((i) => i.status === 'duplicate_found');
+      if (duplicateOnly.length > 0) {
+        setDuplicateModalItem(duplicateOnly[0]);
+        showToast(
+          'warning',
+          'File Duplikat Terdeteksi',
+          `Terdapat ${duplicateOnly.length} file yang sudah ada di Google Drive. Buka jendela konfirmasi untuk memilih ganti atau batalkan.`
+        );
+        return;
+      }
+
+      if (queue.length === 0) {
+        showToast('info', 'Antrean Masih Kosong', 'Silakan pilih gambar terlebih dahulu.');
+      } else if (queue.every((i) => i.status === 'success')) {
+        showToast('success', 'Semua File Sudah Terunggah', 'Seluruh file dalam antrean sudah tersimpan rapi di Google Drive.');
+      } else if (queue.some((i) => i.status === 'invalid_format')) {
+        showToast('error', 'Format File Belum Sesuai', 'Pastikan nama file terdiri dari 5 digit angka dengan format .png (contoh: 11321.png).');
+      }
+      return;
+    }
+
+    // 2. Ensure Google Auth Token once before processing the batch
+    let activeToken = token;
+    if (!activeToken) {
+      try {
+        const loginRes = await googleSignIn();
+        if (!loginRes) return;
+        activeToken = loginRes.accessToken;
+        setToken(loginRes.accessToken);
+        setUser(loginRes.user);
+      } catch (err: unknown) {
+        const errObj = err as { message?: string };
+        showToast('error', 'Login Google Diperlukan', errObj.message || 'Silakan masuk ke akun Google untuk mengunggah.');
+        return;
+      }
+    }
 
     setIsUploadingAny(true);
     let successCount = 0;
+    const detectedDuplicates: UploadQueueItem[] = [];
 
-    for (const item of readyItems) {
-      const success = await executeUploadItem(item);
-      if (success) successCount++;
+    // 3. Process candidate items sequentially
+    for (const item of candidateItems) {
+      const res = await executeUploadItem(item, activeToken, { silentDuplicate: true });
+      if (res.success) {
+        successCount++;
+      } else if (res.isDuplicate && res.duplicateItem) {
+        detectedDuplicates.push(res.duplicateItem);
+      }
     }
 
     setIsUploadingAny(false);
-    showToast(
-      'success',
-      'Proses Upload Selesai',
-      `Berhasil mengunggah ${successCount} dari ${readyItems.length} file ke Google Drive sesuai target rasio masing-masing.`
-    );
+
+    // 4. Detailed completion feedback
+    if (successCount > 0) {
+      showToast(
+        'success',
+        'Unggah Otomatis Selesai',
+        `Berhasil mengunggah ${successCount} dari ${candidateItems.length} file ke Google Drive sesuai target folder masing-masing.`
+      );
+    }
+
+    // If duplicate files were detected during batch upload, show the modal for user resolution
+    if (detectedDuplicates.length > 0) {
+      setDuplicateModalItem(detectedDuplicates[0]);
+      showToast(
+        'warning',
+        'File Duplikat Ditemukan',
+        `${detectedDuplicates.length} file sudah ada di Google Drive. Silakan pilih opsi ganti (replace) atau ubah nama.`
+      );
+    }
   };
 
   // Execute Replace when user chooses "Replace Gambar di Drive" on modal

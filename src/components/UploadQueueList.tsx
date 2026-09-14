@@ -71,6 +71,12 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
 
   // Global status counts
   const readyItems = items.filter((i) => i.status === 'ready');
+  const uploadableItems = items.filter(
+    (i) => i.status === 'ready' || i.status === 'error' || i.status === 'checking_drive'
+  );
+  const aioUploadableCount = uploadableItems.filter((i) => (i.category || 'aio') === 'aio').length;
+  const storyUploadableCount = uploadableItems.filter((i) => i.category === 'story').length;
+
   const aioReadyCount = readyItems.filter((i) => (i.category || 'aio') === 'aio').length;
   const storyReadyCount = readyItems.filter((i) => i.category === 'story').length;
 
@@ -146,27 +152,42 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
             {/* SATU TOMBOL UNGGAH UTAMA (MASTER SMART UPLOAD BUTTON) */}
             <button
               id="master-upload-all-button"
+              type="button"
               onClick={onUploadAllReady}
-              disabled={readyItems.length === 0 || isUploadingAny}
+              disabled={isUploadingAny || (uploadableItems.length === 0 && duplicateItems.length === 0)}
               className="inline-flex items-center gap-2 px-5 py-2.5 text-xs sm:text-sm font-bold text-white rounded-xl shadow-md hover:shadow-lg transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed bg-gradient-to-r from-indigo-600 via-blue-600 to-emerald-600 hover:from-indigo-700 hover:via-blue-700 hover:to-emerald-700 active:scale-98"
+              title="Klik untuk otomatis proses unggah semua file ke Google Drive"
             >
               {isUploadingAny ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Sedang Mengunggah...</span>
+                  <span>Sedang Mengunggah Semua File...</span>
+                </>
+              ) : uploadableItems.length > 0 ? (
+                <>
+                  <Upload className="w-4 h-4" />
+                  <span>
+                    {aioUploadableCount > 0 && storyUploadableCount > 0
+                      ? `Unggah Otomatis ${uploadableItems.length} File (${aioUploadableCount} AIO 1:1 • ${storyUploadableCount} Story 4:5)`
+                      : aioUploadableCount > 0
+                      ? `Unggah Otomatis ${uploadableItems.length} File ke AIO (1:1)`
+                      : `Unggah Otomatis ${uploadableItems.length} File ke Story (4:5)`}
+                  </span>
+                </>
+              ) : duplicateItems.length > 0 ? (
+                <>
+                  <AlertTriangle className="w-4 h-4" />
+                  <span>Periksa ${duplicateItems.length} File Duplikat</span>
+                </>
+              ) : successItems.length > 0 && successItems.length === items.length ? (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>Semua File Selesai Diunggah</span>
                 </>
               ) : (
                 <>
                   <Upload className="w-4 h-4" />
-                  <span>
-                    {readyItems.length === 0
-                      ? 'Tidak Ada File Siap'
-                      : aioReadyCount > 0 && storyReadyCount > 0
-                      ? `Unggah ${readyItems.length} File (${aioReadyCount} AIO 1:1 • ${storyReadyCount} Story 4:5)`
-                      : aioReadyCount > 0
-                      ? `Unggah ${readyItems.length} File ke Folder AIO (1:1)`
-                      : `Unggah ${readyItems.length} File ke Folder Story (4:5)`}
-                  </span>
+                  <span>Tidak Ada File Siap</span>
                 </>
               )}
             </button>
