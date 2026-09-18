@@ -805,6 +805,7 @@ export default function App() {
           item.existingFile.id,
           item.file,
           token,
+          TARGET_FOLDERS[targetCategory].folderId,
           (progress) => {
             setQueue((prev) =>
               prev.map((i) => (i.id === item.id ? { ...i, uploadProgress: progress } : i))

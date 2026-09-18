@@ -587,7 +587,7 @@ async function startServer() {
     }
   });
 
-  // Proxy replace/overwrite to Google Drive API
+  // Proxy replace/overwrite to Google Drive API (with smart recreate fallback if permissions restricted)
   app.patch('/api/drive/replace', rawBodyParser, async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
@@ -596,6 +596,9 @@ async function startServer() {
       }
 
       const fileId = req.headers['x-file-id'] as string;
+      const folderId = req.headers['x-folder-id'] as string;
+      const fileName = decodeURIComponent((req.headers['x-file-name'] as string) || 'image.png');
+
       if (!fileId) {
         return res.status(400).json({ error: { message: 'ID file target tidak ditemukan.' } });
       }
@@ -605,6 +608,9 @@ async function startServer() {
         return res.status(400).json({ error: { message: 'Data gambar kosong.' } });
       }
 
+      console.log(`[DRIVE REPLACE] Attempting binary patch for fileId: ${fileId}`);
+
+      // Strategy 1: Direct binary content PATCH to existing fileId
       const driveRes = await fetch(
         `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true&fields=id,name,webViewLink`,
         {
@@ -618,12 +624,95 @@ async function startServer() {
         }
       );
 
-      const data = await driveRes.json();
-      if (!driveRes.ok) {
-        return res.status(driveRes.status).json(data);
+      if (driveRes.ok) {
+        const data = await driveRes.json();
+        console.log(`[DRIVE REPLACE] Direct PATCH succeeded for fileId: ${fileId}`);
+        return res.json(data);
       }
 
-      return res.json(data);
+      const patchErr = await driveRes.json().catch(() => ({}));
+      console.warn(`[DRIVE REPLACE] Direct PATCH returned status ${driveRes.status}:`, patchErr);
+
+      if (driveRes.status === 401) {
+        return res.status(401).json({
+          error: { message: 'Sesi login Google telah kedaluwarsa. Silakan Logout lalu Login kembali.' },
+        });
+      }
+
+      // Strategy 2: If direct PATCH failed (e.g. 403 insufficientFilePermissions or 404),
+      // perform Smart Replace: Create fresh file in target folder, then detach/trash the old file!
+      if (folderId) {
+        console.log(`[DRIVE REPLACE] Attempting Smart Fallback: creating new file in folder ${folderId}...`);
+        const metadata = {
+          name: fileName,
+          mimeType: 'image/png',
+          parents: [folderId],
+        };
+
+        const boundary = '----------NodeDriveBoundaryReplace' + Date.now().toString(36);
+        const delimiter = `\r\n--${boundary}\r\n`;
+        const closeDelim = `\r\n--${boundary}--`;
+
+        const metadataPart = `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}`;
+        const mediaHeader = `${delimiter}Content-Type: image/png\r\n\r\n`;
+
+        const bodyBuffer = Buffer.concat([
+          Buffer.from(metadataPart, 'utf8'),
+          Buffer.from(mediaHeader, 'utf8'),
+          fileBuffer,
+          Buffer.from(closeDelim, 'utf8'),
+        ]);
+
+        const createRes = await fetch(
+          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,webViewLink',
+          {
+            method: 'POST',
+            headers: {
+              Authorization: authHeader,
+              'Content-Type': `multipart/related; boundary=${boundary}`,
+              'Content-Length': bodyBuffer.length.toString(),
+            },
+            body: bodyBuffer,
+          }
+        );
+
+        if (createRes.ok) {
+          const newFileData = await createRes.json();
+          console.log(`[DRIVE REPLACE] Smart Fallback file created: ${newFileData.id}. Now cleaning old file ${fileId}...`);
+
+          // Attempt removing old file in background
+          try {
+            await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+              method: 'DELETE',
+              headers: { Authorization: authHeader },
+            });
+          } catch (delErr) {
+            console.warn('[DRIVE REPLACE] Non-blocking: Could not hard delete old file:', delErr);
+          }
+
+          try {
+            await fetch(
+              `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(folderId)}&supportsAllDrives=true`,
+              {
+                method: 'PATCH',
+                headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+                body: JSON.stringify({}),
+              }
+            );
+          } catch (unlinkErr) {
+            console.warn('[DRIVE REPLACE] Non-blocking: Could not unlink old file:', unlinkErr);
+          }
+
+          return res.json({
+            ...newFileData,
+            replacedOldFileId: fileId,
+            isRecreated: true,
+          });
+        }
+      }
+
+      const errMsg = patchErr?.error?.message || `Gagal menimpa file di Google Drive (${driveRes.status})`;
+      return res.status(driveRes.status).json({ error: { message: errMsg } });
     } catch (error: any) {
       console.error('Server drive replace error:', error);
       return res.status(500).json({
@@ -729,66 +818,70 @@ async function startServer() {
       // This is the standard Google Drive API approach when user is an Editor in a shared folder, but NOT the owner of the file!
       console.log(`[DRIVE DELETE] Attempting Strategy 3: removeParents for ${fileId}...`);
 
-      // First query file's parent folders and capabilities
-      const metaRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents,owners,capabilities,trashed&supportsAllDrives=true`,
-        {
-          headers: { Authorization: authHeader },
-        }
-      );
-
-      if (metaRes.status === 404) {
-        return res.json({
-          success: true,
-          message: 'File sudah tidak ada di Google Drive (sudah terhapus).',
-        });
-      }
-
-      let parentsToRemove: string[] = [];
-
-      if (metaRes.ok) {
-        const meta = await metaRes.json();
-        if (meta.trashed) {
-          return res.json({
-            success: true,
-            message: 'File sudah berada di tempat sampah Google Drive.',
-          });
-        }
-        if (Array.isArray(meta.parents)) {
-          parentsToRemove = [...meta.parents];
-        }
-      }
-
-      if (folderId && !parentsToRemove.includes(folderId)) {
+      const parentsToRemove: string[] = [];
+      if (folderId) {
         parentsToRemove.push(folderId);
       }
 
-      if (parentsToRemove.length > 0) {
-        const removeQuery = encodeURIComponent(parentsToRemove.join(','));
-        console.log(`[DRIVE DELETE] Removing file ${fileId} from parents: ${parentsToRemove.join(', ')}`);
-
-        const removeRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${removeQuery}&supportsAllDrives=true&enforceSingleParent=false`,
+      try {
+        const metaRes = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents,owners,capabilities,trashed&supportsAllDrives=true`,
           {
-            method: 'PATCH',
-            headers: {
-              Authorization: authHeader,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({}),
+            headers: { Authorization: authHeader },
           }
         );
 
-        if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
-          console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId}`);
+        if (metaRes.status === 404) {
           return res.json({
             success: true,
-            message: 'File berhasil dihapus dari folder Google Drive.',
+            message: 'File sudah tidak ada di Google Drive (sudah terhapus).',
           });
         }
 
-        const removeErr = await removeRes.json().catch(() => ({}));
-        console.warn(`[DRIVE DELETE] removeParents returned status ${removeRes.status}:`, removeErr);
+        if (metaRes.ok) {
+          const meta = await metaRes.json();
+          if (meta.trashed) {
+            return res.json({
+              success: true,
+              message: 'File sudah berada di tempat sampah Google Drive.',
+            });
+          }
+          if (Array.isArray(meta.parents)) {
+            meta.parents.forEach((p: string) => {
+              if (!parentsToRemove.includes(p)) parentsToRemove.push(p);
+            });
+          }
+        }
+      } catch (metaErr) {
+        console.warn('[DRIVE DELETE] Error reading file meta:', metaErr);
+      }
+
+      if (parentsToRemove.length > 0) {
+        for (const pId of parentsToRemove) {
+          try {
+            const removeRes = await fetch(
+              `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(pId)}&supportsAllDrives=true`,
+              {
+                method: 'PATCH',
+                headers: {
+                  Authorization: authHeader,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({}),
+              }
+            );
+
+            if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+              console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId} from parent ${pId}`);
+              return res.json({
+                success: true,
+                message: 'File berhasil dihapus dari folder Google Drive.',
+              });
+            }
+          } catch (rErr) {
+            console.warn(`[DRIVE DELETE] removeParents failed for parent ${pId}:`, rErr);
+          }
+        }
       }
 
       // If all strategies failed, compile human-readable error explanation

@@ -217,59 +217,86 @@ async function clientResumableUpload(
 
 /**
  * Replaces/updates an existing file's binary content in Google Drive.
+ * Includes automatic Smart Fallback (upload new + remove old) if file ownership/permissions prevent direct binary overwriting.
  */
-export function replaceExistingFileInDrive(
+export async function replaceExistingFileInDrive(
   fileId: string,
   file: File,
   token: string,
+  folderId?: string,
   onProgress?: (progress: number) => void
 ): Promise<{ id: string; name: string; webViewLink?: string }> {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PATCH', '/api/drive/replace');
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-      xhr.setRequestHeader('x-file-id', fileId);
-      xhr.setRequestHeader('Content-Type', 'image/png');
+  try {
+    const result = await new Promise<{ id: string; name: string; webViewLink?: string }>(
+      async (resolve, reject) => {
+        try {
+          const xhr = new XMLHttpRequest();
+          xhr.open('PATCH', '/api/drive/replace');
+          xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+          xhr.setRequestHeader('x-file-id', fileId);
+          if (folderId) {
+            xhr.setRequestHeader('x-folder-id', folderId);
+          }
+          xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name));
+          xhr.setRequestHeader('Content-Type', 'image/png');
 
-      if (xhr.upload && onProgress) {
-        xhr.upload.onprogress = (e) => {
-          if (e.lengthComputable) {
-            const percent = Math.round((e.loaded / e.total) * 100);
-            onProgress(percent);
+          if (xhr.upload && onProgress) {
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                const percent = Math.round((e.loaded / e.total) * 90);
+                onProgress(percent);
+              }
+            };
           }
-        };
-      }
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            const result = JSON.parse(xhr.responseText);
-            if (onProgress) onProgress(100);
-            resolve(result);
-          } catch {
-            resolve({ id: fileId, name: file.name });
-          }
-        } else {
-          try {
-            const errRes = JSON.parse(xhr.responseText);
-            reject(new Error(errRes?.error?.message || `Gagal menimpa file (${xhr.status})`));
-          } catch {
-            reject(new Error(`Gagal menimpa file (${xhr.status})`));
-          }
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              try {
+                const data = JSON.parse(xhr.responseText);
+                if (onProgress) onProgress(100);
+                resolve(data);
+              } catch {
+                resolve({ id: fileId, name: file.name });
+              }
+            } else {
+              try {
+                const errRes = JSON.parse(xhr.responseText);
+                reject(new Error(errRes?.error?.message || `Gagal menimpa file (${xhr.status})`));
+              } catch {
+                reject(new Error(`Gagal menimpa file (${xhr.status})`));
+              }
+            }
+          };
+
+          xhr.onerror = () => {
+            reject(new Error('Koneksi jaringan terputus saat menimpa file'));
+          };
+
+          const arrayBuffer = await file.arrayBuffer();
+          xhr.send(new Uint8Array(arrayBuffer));
+        } catch (err) {
+          reject(err);
         }
-      };
+      }
+    );
 
-      xhr.onerror = () => {
-        reject(new Error('Koneksi jaringan terputus saat menimpa file'));
-      };
+    return result;
+  } catch (err) {
+    console.warn('[REPLACE FALLBACK] Server PATCH failed, attempting client-side fallback upload...', err);
 
-      const arrayBuffer = await file.arrayBuffer();
-      xhr.send(new Uint8Array(arrayBuffer));
-    } catch (err) {
-      reject(err);
+    if (folderId) {
+      // Client-side smart replace: upload new file to folder, then unlink/delete old file
+      const uploaded = await uploadPngToDrive(folderId, file, token, file.name, onProgress);
+      try {
+        await deleteDriveFile(fileId, token, folderId);
+      } catch (delErr) {
+        console.warn('[REPLACE FALLBACK] Old duplicate file deletion error (non-fatal):', delErr);
+      }
+      return uploaded;
     }
-  });
+
+    throw err;
+  }
 }
 
 /**
@@ -334,7 +361,8 @@ export async function listFolderFiles(
 
 /**
  * Deletes a file from Google Drive (e.g. cleaning duplicate files or removing single file).
- * Uses the server proxy gateway with multi-tier fallback (Hard Delete -> Trash -> Remove Parents).
+ * Uses the server proxy gateway with multi-tier fallback (Hard Delete -> Trash -> Remove Parents),
+ * with direct client-side fallback if server proxy is unavailable or restricted.
  */
 export async function deleteDriveFile(
   fileId: string,
@@ -346,30 +374,121 @@ export async function deleteDriveFile(
     queryParams.set('folderId', folderId);
   }
 
-  const res = await fetch(`/api/drive/delete?${queryParams.toString()}`, {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'x-file-id': fileId,
-      ...(folderId ? { 'x-folder-id': folderId } : {}),
-    },
-  });
+  try {
+    const res = await fetch(`/api/drive/delete?${queryParams.toString()}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'x-file-id': fileId,
+        ...(folderId ? { 'x-folder-id': folderId } : {}),
+      },
+    });
 
-  // If status is 404, file is already gone, which is a success state
-  if (res.status === 404) {
-    return true;
+    // If status is 404, file is already gone, which is a success state
+    if (res.status === 404) {
+      return true;
+    }
+
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok) {
+      return true;
+    }
+
+    const errorMessage =
+      data?.error?.message ||
+      data?.message ||
+      `Gagal menghapus file dari Google Drive (${res.status})`;
+
+    // If not token expired, attempt direct client-side fallback to Google Drive API
+    if (res.status !== 401) {
+      const clientFallbackOk = await attemptDirectClientDelete(fileId, token, folderId);
+      if (clientFallbackOk) {
+        return true;
+      }
+    }
+
+    throw new Error(errorMessage);
+  } catch (err: unknown) {
+    // If network or proxy error, attempt direct client-side fallback
+    const clientFallbackOk = await attemptDirectClientDelete(fileId, token, folderId);
+    if (clientFallbackOk) {
+      return true;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Direct client-side deletion / unlinking fallback against Google Drive API v3
+ */
+async function attemptDirectClientDelete(
+  fileId: string,
+  token: string,
+  folderId?: string
+): Promise<boolean> {
+  console.log(`[CLIENT DELETE FALLBACK] Attempting direct client-side deletion for ${fileId}...`);
+
+  // 1. Try Direct Hard Delete
+  try {
+    const hardRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    if (hardRes.ok || hardRes.status === 204 || hardRes.status === 404) {
+      console.log(`[CLIENT DELETE FALLBACK] Hard delete succeeded for ${fileId}`);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[CLIENT DELETE FALLBACK] Hard delete failed:', e);
   }
 
-  const data = await res.json().catch(() => ({}));
-
-  if (res.ok) {
-    return true;
+  // 2. Try Move to Trash
+  try {
+    const trashRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ trashed: true }),
+      }
+    );
+    if (trashRes.ok || trashRes.status === 204 || trashRes.status === 404) {
+      console.log(`[CLIENT DELETE FALLBACK] Trashed succeeded for ${fileId}`);
+      return true;
+    }
+  } catch (e) {
+    console.warn('[CLIENT DELETE FALLBACK] Trashing failed:', e);
   }
 
-  const errorMessage =
-    data?.error?.message ||
-    data?.message ||
-    `Gagal menghapus file dari Google Drive (${res.status})`;
+  // 3. Try removeParents if folderId is known
+  if (folderId) {
+    try {
+      const removeRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(folderId)}&supportsAllDrives=true`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}),
+        }
+      );
+      if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+        console.log(`[CLIENT DELETE FALLBACK] removeParents succeeded for ${fileId}`);
+        return true;
+      }
+    } catch (e) {
+      console.warn('[CLIENT DELETE FALLBACK] removeParents failed:', e);
+    }
+  }
 
-  throw new Error(errorMessage);
+  return false;
 }
