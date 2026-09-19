@@ -682,9 +682,22 @@ export default function App() {
     setIsUploadingAny(false);
 
     // Auto-sync single uploaded file to Google Sheet
-    if (res.success && token) {
-      const targetMode = item.category === 'story' ? 'story' : 'aio';
-      triggerAutoSheetSync(token, targetMode, `Unggah ${item.file.name}`);
+    if (res.success) {
+      if (token) {
+        const targetMode = item.category === 'story' ? 'story' : 'aio';
+        triggerAutoSheetSync(token, targetMode, `Unggah ${item.file.name}`);
+      }
+
+      // Auto-clear item from queue history after successful upload
+      setTimeout(() => {
+        setQueue((prev) => {
+          const target = prev.find((i) => i.id === item.id);
+          if (target?.previewUrl) {
+            URL.revokeObjectURL(target.previewUrl);
+          }
+          return prev.filter((i) => i.id !== item.id);
+        });
+      }, 1200);
     }
   };
 
@@ -753,12 +766,12 @@ export default function App() {
 
     setIsUploadingAny(false);
 
-    // 4. Detailed completion feedback
+    // 4. Detailed completion feedback & auto-clear completed history
     if (successCount > 0) {
       showToast(
         'success',
         'Unggah Otomatis Selesai',
-        `Berhasil mengunggah ${successCount} dari ${candidateItems.length} file ke Google Drive sesuai target folder masing-masing.`
+        `Berhasil mengunggah ${successCount} dari ${candidateItems.length} file ke Google Drive. Riwayat berhasil diunggah otomatis dibersihkan.`
       );
 
       // 5. ⚡ AUTOMATIC DRIVE ID TO GOOGLE SHEET SYNC (1 KALI KERJA)
@@ -771,6 +784,18 @@ export default function App() {
           : 'aio';
 
       triggerAutoSheetSync(activeToken, syncMode, `Unggah ${successCount} File`);
+
+      // 6. 🧹 AUTO-CLEAR COMPLETED QUEUE / HISTORY AFTER SUCCESSFUL UPLOAD
+      setTimeout(() => {
+        setQueue((prev) => {
+          prev.forEach((item) => {
+            if (item.status === 'success' && item.previewUrl) {
+              URL.revokeObjectURL(item.previewUrl);
+            }
+          });
+          return prev.filter((item) => item.status !== 'success');
+        });
+      }, 1200);
     }
 
     // If duplicate files were detected during batch upload, show the modal for user resolution
@@ -869,6 +894,17 @@ export default function App() {
 
       // Auto-sync replaced file ID to Google Sheet (1 kali kerja)
       triggerAutoSheetSync(token, targetCategory, `Replace ${item.file.name}`);
+
+      // Auto-clear replaced item from queue history after short delay
+      setTimeout(() => {
+        setQueue((prev) => {
+          const target = prev.find((i) => i.id === item.id);
+          if (target?.previewUrl) {
+            URL.revokeObjectURL(target.previewUrl);
+          }
+          return prev.filter((i) => i.id !== item.id);
+        });
+      }, 1200);
     } catch (err: unknown) {
       const errObj = err as { message?: string };
       setIsReplacingFile(false);
