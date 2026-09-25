@@ -493,13 +493,16 @@ async function attemptDirectClientDelete(
     console.warn('[CLIENT DELETE FALLBACK] Trashing failed:', e);
   }
 
-  // 3. Try removeParents (using provided folderId or by querying file parents)
-  const parentsToUnlink: string[] = [];
+  // 3. Try removeParents (using provided folderId, known target folders, and by querying file parents)
+  // This allows deleting/unlinking files uploaded by ANY Google account in a shared workspace folder
+  const parentsToUnlink = new Set<string>();
   if (folderId) {
-    parentsToUnlink.push(folderId);
+    parentsToUnlink.add(folderId);
   }
+  parentsToUnlink.add('1xYDYQfYIvFK8AxzfEFchdPg7wv58zfyI'); // AIO Folder
+  parentsToUnlink.add('1A4MpcBh6t60ys0KVvLjdr5F3J0Im3U_E'); // Story Folder
 
-  // If no folderId or to ensure complete unlinking, query parent metadata
+  // Query parent metadata to discover all parent folders
   try {
     const metaRes = await fetch(
       `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true&includeItemsFromAllDrives=true`,
@@ -509,7 +512,7 @@ async function attemptDirectClientDelete(
       const meta = await metaRes.json();
       if (Array.isArray(meta.parents)) {
         meta.parents.forEach((p: string) => {
-          if (!parentsToUnlink.includes(p)) parentsToUnlink.push(p);
+          if (p) parentsToUnlink.add(p);
         });
       }
     }
@@ -517,29 +520,30 @@ async function attemptDirectClientDelete(
     // Continue with existing parentsToUnlink
   }
 
-  if (parentsToUnlink.length > 0) {
-    for (const pId of parentsToUnlink) {
-      try {
-        const removeRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(pId)}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
-          {
-            method: 'PATCH',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({}),
-          }
-        );
-        if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
-          console.log(`[CLIENT DELETE FALLBACK] removeParents succeeded for ${fileId} from parent ${pId}`);
-          return true;
+  let unlinkSuccess = false;
+  for (const pId of Array.from(parentsToUnlink)) {
+    try {
+      const removeRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
+          pId
+        )}&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({}),
         }
-      } catch (e) {
-        console.warn(`[CLIENT DELETE FALLBACK] removeParents failed for parent ${pId}:`, e);
+      );
+      if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+        console.log(`[CLIENT DELETE FALLBACK] removeParents succeeded for ${fileId} from parent ${pId}`);
+        unlinkSuccess = true;
       }
+    } catch (e) {
+      console.warn(`[CLIENT DELETE FALLBACK] removeParents failed for parent ${pId}:`, e);
     }
   }
 
-  return false;
+  return unlinkSuccess;
 }

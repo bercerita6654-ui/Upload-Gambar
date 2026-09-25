@@ -753,7 +753,7 @@ async function startServer() {
               await fetch(
                 `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
                   folderId
-                )}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
+                )}&supportsAllDrives=true&includeItemsFromAllDrives=true`,
                 {
                   method: 'PATCH',
                   headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
@@ -877,11 +877,15 @@ async function startServer() {
       }
 
       // Strategy 3: Remove from parent folder(s) (removeParents)
+      // Allows deleting/unlinking files uploaded by ANY Google account in shared folders where user is editor
       console.log(`[DRIVE DELETE] Attempting Strategy 3: removeParents for ${fileId}...`);
-      const parentsToRemove: string[] = [];
+      const parentsToRemove = new Set<string>();
       if (folderId) {
-        parentsToRemove.push(folderId);
+        parentsToRemove.add(folderId);
       }
+      // Add known target folders
+      parentsToRemove.add('1xYDYQfYIvFK8AxzfEFchdPg7wv58zfyI'); // AIO folder
+      parentsToRemove.add('1A4MpcBh6t60ys0KVvLjdr5F3J0Im3U_E'); // Story folder
 
       try {
         const metaRes = await fetch(
@@ -908,7 +912,7 @@ async function startServer() {
           }
           if (Array.isArray(meta.parents)) {
             meta.parents.forEach((p: string) => {
-              if (!parentsToRemove.includes(p)) parentsToRemove.push(p);
+              if (p) parentsToRemove.add(p);
             });
           }
         }
@@ -916,39 +920,74 @@ async function startServer() {
         console.warn('[DRIVE DELETE] Error reading file meta:', metaErr);
       }
 
-      if (parentsToRemove.length > 0) {
-        for (const pId of parentsToRemove) {
-          try {
-            const removeRes = await fetch(
-              `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(pId)}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
-              {
-                method: 'PATCH',
-                headers: {
-                  Authorization: authHeader,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({}),
-              }
-            );
-
-            if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
-              console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId} from parent ${pId}`);
-              return res.json({
-                success: true,
-                message: 'File berhasil dihapus dari folder Google Drive.',
-              });
+      let unlinkSucceeded = false;
+      for (const pId of Array.from(parentsToRemove)) {
+        try {
+          const removeRes = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
+              pId
+            )}&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+            {
+              method: 'PATCH',
+              headers: {
+                Authorization: authHeader,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({}),
             }
-          } catch (rErr) {
-            console.warn(`[DRIVE DELETE] removeParents failed for parent ${pId}:`, rErr);
+          );
+
+          if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+            console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId} from parent ${pId}`);
+            unlinkSucceeded = true;
+          } else {
+            const errText = await removeRes.text().catch(() => '');
+            console.warn(`[DRIVE DELETE] removeParents returned ${removeRes.status} for parent ${pId}:`, errText);
+          }
+        } catch (rErr) {
+          console.warn(`[DRIVE DELETE] removeParents failed for parent ${pId}:`, rErr);
+        }
+      }
+
+      if (unlinkSucceeded) {
+        return res.json({
+          success: true,
+          message: 'File berhasil dihapus dari folder Google Drive.',
+        });
+      }
+
+      // Strategy 4: Fallback to Google Apps Script execution
+      try {
+        const scriptUrl =
+          'https://script.google.com/macros/s/AKfycbzjPVi5VEr3RU1Ixs7LwAFKiX9hUYlphq0V9k3WIacJjxa7cJvhIVHRwop-cofQmjUE4Q/exec';
+        const scriptRes = await fetch(
+          `${scriptUrl}?action=delete&fileId=${encodeURIComponent(fileId)}&folderId=${encodeURIComponent(
+            folderId || ''
+          )}`,
+          {
+            method: 'GET',
+            redirect: 'follow',
+          }
+        );
+        if (scriptRes.ok) {
+          const scriptData = await scriptRes.json().catch(() => null);
+          if (scriptData && scriptData.status === 'success') {
+            return res.json({
+              success: true,
+              message: 'File berhasil dihapus melalui otomasi Google Drive.',
+            });
           }
         }
+      } catch (scriptErr) {
+        console.warn('[DRIVE DELETE] Strategy 4 Apps Script fallback warning:', scriptErr);
       }
 
       // If all strategies returned restricted status:
       return res.status(403).json({
         error: {
           code: 'DELETE_RESTRICTED',
-          message: 'Akun Google Anda tidak memiliki izin untuk menghapus file ini (hanya pemilik file atau editor folder yang dapat menghapus). Silakan pastikan akun Anda memiliki hak akses Editor ke folder ini.',
+          message:
+            'Akun Google Anda tidak memiliki izin untuk menghapus file ini (hanya pemilik file atau editor folder yang dapat menghapus). Silakan pastikan akun Anda memiliki hak akses Editor ke folder ini.',
         },
       });
     } catch (error: any) {
