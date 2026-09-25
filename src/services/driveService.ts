@@ -218,6 +218,7 @@ async function clientResumableUpload(
 /**
  * Replaces/updates an existing file's binary content in Google Drive.
  * Includes automatic Smart Fallback (upload new + remove old) if file ownership/permissions prevent direct binary overwriting.
+ * Ensures folderId is preserved and passed via headers and query params, with automatic parent discovery if missing.
  */
 export async function replaceExistingFileInDrive(
   fileId: string,
@@ -226,16 +227,41 @@ export async function replaceExistingFileInDrive(
   folderId?: string,
   onProgress?: (progress: number) => void
 ): Promise<{ id: string; name: string; webViewLink?: string }> {
+  // If folderId is not passed, attempt to dynamically inspect parent folder from Drive API
+  let effectiveFolderId = folderId;
+  if (!effectiveFolderId && token) {
+    try {
+      const metaRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (metaRes.ok) {
+        const meta = await metaRes.json();
+        if (Array.isArray(meta.parents) && meta.parents.length > 0) {
+          effectiveFolderId = meta.parents[0];
+        }
+      }
+    } catch {
+      // Non-fatal, continue with replace
+    }
+  }
+
   try {
     const result = await new Promise<{ id: string; name: string; webViewLink?: string }>(
       async (resolve, reject) => {
         try {
           const xhr = new XMLHttpRequest();
-          xhr.open('PATCH', '/api/drive/replace');
+          const queryParams = new URLSearchParams({ fileId });
+          if (effectiveFolderId) {
+            queryParams.set('folderId', effectiveFolderId);
+          }
+          queryParams.set('fileName', encodeURIComponent(file.name));
+
+          xhr.open('PATCH', `/api/drive/replace?${queryParams.toString()}`);
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
           xhr.setRequestHeader('x-file-id', fileId);
-          if (folderId) {
-            xhr.setRequestHeader('x-folder-id', folderId);
+          if (effectiveFolderId) {
+            xhr.setRequestHeader('x-folder-id', effectiveFolderId);
           }
           xhr.setRequestHeader('x-file-name', encodeURIComponent(file.name));
           xhr.setRequestHeader('Content-Type', 'image/png');
@@ -284,11 +310,11 @@ export async function replaceExistingFileInDrive(
   } catch (err) {
     console.warn('[REPLACE FALLBACK] Server PATCH failed, attempting client-side fallback upload...', err);
 
-    if (folderId) {
-      // Client-side smart replace: upload new file to folder, then unlink/delete old file
-      const uploaded = await uploadPngToDrive(folderId, file, token, file.name, onProgress);
+    if (effectiveFolderId) {
+      // Client-side smart replace: upload new file to target folder, then unlink/delete old file
+      const uploaded = await uploadPngToDrive(effectiveFolderId, file, token, file.name, onProgress);
       try {
-        await deleteDriveFile(fileId, token, folderId);
+        await deleteDriveFile(fileId, token, effectiveFolderId);
       } catch (delErr) {
         console.warn('[REPLACE FALLBACK] Old duplicate file deletion error (non-fatal):', delErr);
       }
@@ -467,26 +493,51 @@ async function attemptDirectClientDelete(
     console.warn('[CLIENT DELETE FALLBACK] Trashing failed:', e);
   }
 
-  // 3. Try removeParents if folderId is known
+  // 3. Try removeParents (using provided folderId or by querying file parents)
+  const parentsToUnlink: string[] = [];
   if (folderId) {
-    try {
-      const removeRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(folderId)}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
-        {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({}),
-        }
-      );
-      if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
-        console.log(`[CLIENT DELETE FALLBACK] removeParents succeeded for ${fileId}`);
-        return true;
+    parentsToUnlink.push(folderId);
+  }
+
+  // If no folderId or to ensure complete unlinking, query parent metadata
+  try {
+    const metaRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (metaRes.ok) {
+      const meta = await metaRes.json();
+      if (Array.isArray(meta.parents)) {
+        meta.parents.forEach((p: string) => {
+          if (!parentsToUnlink.includes(p)) parentsToUnlink.push(p);
+        });
       }
-    } catch (e) {
-      console.warn('[CLIENT DELETE FALLBACK] removeParents failed:', e);
+    }
+  } catch {
+    // Continue with existing parentsToUnlink
+  }
+
+  if (parentsToUnlink.length > 0) {
+    for (const pId of parentsToUnlink) {
+      try {
+        const removeRes = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(pId)}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
+          {
+            method: 'PATCH',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({}),
+          }
+        );
+        if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+          console.log(`[CLIENT DELETE FALLBACK] removeParents succeeded for ${fileId} from parent ${pId}`);
+          return true;
+        }
+      } catch (e) {
+        console.warn(`[CLIENT DELETE FALLBACK] removeParents failed for parent ${pId}:`, e);
+      }
     }
   }
 

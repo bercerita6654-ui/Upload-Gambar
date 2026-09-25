@@ -748,6 +748,23 @@ async function startServer() {
             console.warn('[DRIVE REPLACE] Non-blocking old file trash notice:', trashErr);
           }
 
+          if (folderId) {
+            try {
+              await fetch(
+                `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
+                  folderId
+                )}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
+                {
+                  method: 'PATCH',
+                  headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+                  body: JSON.stringify({}),
+                }
+              );
+            } catch (unlinkErr) {
+              console.warn('[DRIVE REPLACE] Non-blocking old file unlink notice:', unlinkErr);
+            }
+          }
+
           return res.json({
             ...newFileData,
             replacedOldFileId: fileId,
