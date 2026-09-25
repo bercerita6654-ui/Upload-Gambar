@@ -811,13 +811,33 @@ export default function App() {
 
   // Execute Replace when user chooses "Replace Gambar di Drive" on modal
   const handleExecuteReplace = async (item: UploadQueueItem) => {
-    if (!token) {
+    let activeToken = token;
+    if (!activeToken) {
+      activeToken = await getAccessToken();
+    }
+    if (!activeToken) {
+      try {
+        const loginRes = await googleSignIn();
+        if (loginRes) {
+          activeToken = loginRes.accessToken;
+          setToken(loginRes.accessToken);
+          setUser(loginRes.user);
+        }
+      } catch (err: unknown) {
+        const errObj = err as { message?: string };
+        showToast('error', 'Login Diperlukan', errObj.message || 'Silakan hubungkan akun Google terlebih dahulu.');
+        return;
+      }
+    }
+
+    if (!activeToken) {
       showToast('error', 'Login Diperlukan', 'Silakan hubungkan akun Google terlebih dahulu.');
       return;
     }
 
     setIsReplacingFile(true);
     const targetCategory = item.category || 'aio';
+    const targetFolderId = TARGET_FOLDERS[targetCategory].folderId;
 
     setQueue((prev) =>
       prev.map((i) => (i.id === item.id ? { ...i, status: 'uploading', uploadProgress: 10 } : i))
@@ -829,8 +849,8 @@ export default function App() {
         result = await replaceExistingFileInDrive(
           item.existingFile.id,
           item.file,
-          token,
-          TARGET_FOLDERS[targetCategory].folderId,
+          activeToken,
+          targetFolderId,
           (progress) => {
             setQueue((prev) =>
               prev.map((i) => (i.id === item.id ? { ...i, uploadProgress: progress } : i))
@@ -839,9 +859,9 @@ export default function App() {
         );
       } else {
         result = await uploadPngToDrive(
-          TARGET_FOLDERS[targetCategory].folderId,
+          targetFolderId,
           item.file,
-          token,
+          activeToken,
           item.file.name,
           (progress) => {
             setQueue((prev) =>
@@ -872,7 +892,7 @@ export default function App() {
         const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
         for (const copy of extraCopies) {
           try {
-            await deleteDriveFile(copy.id, token, targetFolderConfig?.folderId);
+            await deleteDriveFile(copy.id, activeToken, targetFolderConfig?.folderId);
             cleanedCount++;
           } catch (delErr) {
             console.warn('Could not auto-clean extra duplicate copy:', delErr);
@@ -890,10 +910,10 @@ export default function App() {
         `File ${item.file.name} telah berhasil di-replace di Google Drive folder ${TARGET_FOLDERS[targetCategory].name}${cleanupNotice}.`
       );
 
-      fetchFolderContent(targetCategory, token);
+      fetchFolderContent(targetCategory, activeToken);
 
       // Auto-sync replaced file ID to Google Sheet (1 kali kerja)
-      triggerAutoSheetSync(token, targetCategory, `Replace ${item.file.name}`);
+      triggerAutoSheetSync(activeToken, targetCategory, `Replace ${item.file.name}`);
 
       // Auto-clear replaced item from queue history after short delay
       setTimeout(() => {
@@ -948,7 +968,26 @@ export default function App() {
 
   // User chooses "Hapus File Lama di Google Drive" directly from modal
   const handleDeleteExistingFromModal = async (item: UploadQueueItem) => {
-    if (!token) {
+    let activeToken = token;
+    if (!activeToken) {
+      activeToken = await getAccessToken();
+    }
+    if (!activeToken) {
+      try {
+        const loginRes = await googleSignIn();
+        if (loginRes) {
+          activeToken = loginRes.accessToken;
+          setToken(loginRes.accessToken);
+          setUser(loginRes.user);
+        }
+      } catch (err: unknown) {
+        const errObj = err as { message?: string };
+        showToast('error', 'Login Diperlukan', errObj.message || 'Silakan masuk dengan akun Google.');
+        return;
+      }
+    }
+
+    if (!activeToken) {
       showToast('error', 'Login Diperlukan', 'Silakan masuk dengan akun Google.');
       return;
     }
@@ -960,14 +999,14 @@ export default function App() {
 
     try {
       // 1. Delete the primary existing file from Google Drive
-      await deleteDriveFile(item.existingFile.id, token, targetFolderConfig?.folderId);
+      await deleteDriveFile(item.existingFile.id, activeToken, targetFolderConfig?.folderId);
 
       // 2. Also delete any extra duplicate copies in Drive if present
       if (item.existingFile.allMatches && item.existingFile.allMatches.length > 1) {
         const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
         for (const copy of extraCopies) {
           try {
-            await deleteDriveFile(copy.id, token, targetFolderConfig?.folderId);
+            await deleteDriveFile(copy.id, activeToken, targetFolderConfig?.folderId);
           } catch (delErr) {
             console.warn('Could not auto-clean extra duplicate copy:', delErr);
           }
@@ -983,6 +1022,7 @@ export default function App() {
                 status: 'ready',
                 existingFile: undefined,
                 error: undefined,
+                statusMessage: undefined,
               }
             : i
         )
@@ -991,11 +1031,11 @@ export default function App() {
       setDuplicateModalItem(null);
       showToast(
         'success',
-        'File Berhasil Dihapus dari Drive',
+        'File Duplikat Berhasil Dihapus dari Drive',
         `File ${item.existingFile.name} telah berhasil dihapus dari Google Drive. File baru kini siap diupload!`
       );
 
-      fetchFolderContent(targetCategory, token);
+      fetchFolderContent(targetCategory, activeToken);
     } catch (err: unknown) {
       const errObj = err as { message?: string };
       showToast(

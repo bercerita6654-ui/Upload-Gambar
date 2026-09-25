@@ -432,7 +432,7 @@ async function attemptDirectClientDelete(
   // 1. Try Direct Hard Delete
   try {
     const hardRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
       {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
@@ -449,7 +449,7 @@ async function attemptDirectClientDelete(
   // 2. Try Move to Trash
   try {
     const trashRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
       {
         method: 'PATCH',
         headers: {
@@ -471,7 +471,7 @@ async function attemptDirectClientDelete(
   if (folderId) {
     try {
       const removeRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(folderId)}&supportsAllDrives=true`,
+        `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(folderId)}&supportsAllDrives=true&includeItemsFromAllDrives=true&enforceSingleParent=false`,
         {
           method: 'PATCH',
           headers: {

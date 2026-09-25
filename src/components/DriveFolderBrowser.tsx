@@ -3,6 +3,7 @@ import { DriveFileInfo, FolderCategory } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
 import { SyncDriveButton } from './SyncDriveButton';
 import { deleteDriveFile } from '../services/driveService';
+import { getAccessToken } from '../services/auth';
 import { lookupProductName } from '../services/productCatalogService';
 import {
   Boxes,
@@ -147,7 +148,11 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
 
   const confirmDeleteSingle = async () => {
     if (!fileToDelete) return;
-    if (!token) {
+    let activeToken = token;
+    if (!activeToken) {
+      activeToken = await getAccessToken();
+    }
+    if (!activeToken) {
       onShowToast?.('error', 'Login Diperlukan', 'Silakan masuk dengan akun Google.');
       setFileToDelete(null);
       return;
@@ -155,7 +160,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
 
     setIsDeletingSingle(true);
     try {
-      await deleteDriveFile(fileToDelete.id, token, targetConfig.folderId);
+      await deleteDriveFile(fileToDelete.id, activeToken, targetConfig.folderId);
       onShowToast?.(
         'success',
         'File Berhasil Dihapus',
@@ -176,7 +181,11 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
   };
 
   const handleExecuteBatchDelete = async () => {
-    if (!token) {
+    let activeToken = token;
+    if (!activeToken) {
+      activeToken = await getAccessToken();
+    }
+    if (!activeToken) {
       onShowToast?.('error', 'Login Diperlukan', 'Silakan masuk dengan akun Google.');
       return;
     }
@@ -209,7 +218,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
       setBatchProgressPercent(Math.round(((i + 1) / filesToDelete.length) * 100));
 
       try {
-        await deleteDriveFile(file.id, token, targetConfig.folderId);
+        await deleteDriveFile(file.id, activeToken, targetConfig.folderId);
         deletedCount++;
       } catch (err) {
         console.warn(`Failed to delete duplicate ${file.name} (${file.id}):`, err);
