@@ -12,8 +12,8 @@ export async function checkFileExistsInFolder(
   const cleanName = fileName.trim();
   const escapedName = cleanName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   
-  // Also check without extension if applicable or standard variations
-  const query = `'${folderId}' in parents and (name = '${escapedName}' or name = '${escapedName.toLowerCase()}' or name = '${escapedName.toUpperCase()}') and trashed = false`;
+  // Also check without extension if applicable or standard variations, excluding tombstoned files
+  const query = `'${folderId}' in parents and (name = '${escapedName}' or name = '${escapedName.toLowerCase()}' or name = '${escapedName.toUpperCase()}') and trashed = false and not name contains '.deleted_'`;
 
   const url = new URL('https://www.googleapis.com/drive/v3/files');
   url.searchParams.set('q', query);
@@ -42,12 +42,16 @@ export async function checkFileExistsInFolder(
   }
 
   const data = await response.json();
-  if (data.files && data.files.length > 0) {
-    const primary = data.files[0] as DriveFileInfo;
+  const validFiles = ((data.files || []) as DriveFileInfo[]).filter(
+    (f) => f && f.name && !f.name.startsWith('.deleted_') && !f.name.startsWith('.trash_')
+  );
+
+  if (validFiles.length > 0) {
+    const primary = validFiles[0];
     return {
       ...primary,
-      duplicateCount: data.files.length,
-      allMatches: data.files as DriveFileInfo[],
+      duplicateCount: validFiles.length,
+      allMatches: validFiles,
     };
   }
 
@@ -232,7 +236,7 @@ export async function replaceExistingFileInDrive(
   if (!effectiveFolderId && token) {
     try {
       const metaRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+        `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       if (metaRes.ok) {
@@ -308,16 +312,55 @@ export async function replaceExistingFileInDrive(
 
     return result;
   } catch (err) {
-    console.warn('[REPLACE FALLBACK] Server PATCH failed, attempting client-side fallback upload...', err);
+    console.warn('[REPLACE FALLBACK] Server PATCH failed, attempting client-side direct media patch...', err);
+
+    // Client fallback 1: Direct media binary PATCH to Google Drive API with Content-Length
+    try {
+      const directRes = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'image/png',
+            'Content-Length': file.size.toString(),
+          },
+          body: file,
+        }
+      );
+
+      if (directRes.ok) {
+        const directData = await directRes.json();
+        // Update name
+        try {
+          await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+            method: 'PATCH',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ name: file.name }),
+          });
+        } catch {}
+        if (onProgress) onProgress(100);
+        return {
+          id: fileId,
+          name: file.name,
+          webViewLink: directData.webViewLink,
+        };
+      }
+    } catch (directErr) {
+      console.warn('[REPLACE FALLBACK] Direct client media PATCH failed:', directErr);
+    }
 
     if (effectiveFolderId) {
-      // Client-side smart replace: upload new file to target folder, then unlink/delete old file
-      const uploaded = await uploadPngToDrive(effectiveFolderId, file, token, file.name, onProgress);
+      // Client-side fallback 2: delete old duplicate file first, then upload new file to target folder
       try {
         await deleteDriveFile(fileId, token, effectiveFolderId);
       } catch (delErr) {
         console.warn('[REPLACE FALLBACK] Old duplicate file deletion error (non-fatal):', delErr);
       }
+      const uploaded = await uploadPngToDrive(effectiveFolderId, file, token, file.name, onProgress);
       return uploaded;
     }
 
@@ -334,7 +377,7 @@ export async function listFolderFiles(
   token: string,
   onProgress?: (loadedCount: number) => void
 ): Promise<DriveFileInfo[]> {
-  const query = `'${folderId}' in parents and trashed = false`;
+  const query = `'${folderId}' in parents and trashed = false and not name contains '.deleted_' and not name contains '.trash_'`;
   const allFiles: DriveFileInfo[] = [];
   let pageToken: string | null = null;
   let pageCount = 0;
@@ -371,7 +414,9 @@ export async function listFolderFiles(
     }
 
     const data = await response.json();
-    const batch = (data.files || []) as DriveFileInfo[];
+    const batch = ((data.files || []) as DriveFileInfo[]).filter(
+      (f) => f && f.name && !f.name.startsWith('.deleted_') && !f.name.startsWith('.trash_')
+    );
     allFiles.push(...batch);
 
     if (onProgress) {
@@ -458,7 +503,7 @@ async function attemptDirectClientDelete(
   // 1. Try Direct Hard Delete
   try {
     const hardRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
       {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` },
@@ -475,7 +520,7 @@ async function attemptDirectClientDelete(
   // 2. Try Move to Trash
   try {
     const trashRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
       {
         method: 'PATCH',
         headers: {
@@ -493,23 +538,25 @@ async function attemptDirectClientDelete(
     console.warn('[CLIENT DELETE FALLBACK] Trashing failed:', e);
   }
 
-  // 3. Try removeParents (using provided folderId, known target folders, and by querying file parents)
-  // This allows deleting/unlinking files uploaded by ANY Google account in a shared workspace folder
+  // 3. Try removeParents (using actual parent folders from file metadata)
   const parentsToUnlink = new Set<string>();
   if (folderId) {
     parentsToUnlink.add(folderId);
   }
-  parentsToUnlink.add('1xYDYQfYIvFK8AxzfEFchdPg7wv58zfyI'); // AIO Folder
-  parentsToUnlink.add('1A4MpcBh6t60ys0KVvLjdr5F3J0Im3U_E'); // Story Folder
 
-  // Query parent metadata to discover all parent folders
+  let unlinkSuccess = false;
+  let fileCurrentName = '';
+
   try {
     const metaRes = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+      `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents,trashed&supportsAllDrives=true`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
+    if (metaRes.status === 404) return true;
     if (metaRes.ok) {
       const meta = await metaRes.json();
+      fileCurrentName = meta.name || '';
+      if (meta.trashed) return true;
       if (Array.isArray(meta.parents)) {
         meta.parents.forEach((p: string) => {
           if (p) parentsToUnlink.add(p);
@@ -520,13 +567,12 @@ async function attemptDirectClientDelete(
     // Continue with existing parentsToUnlink
   }
 
-  let unlinkSuccess = false;
   for (const pId of Array.from(parentsToUnlink)) {
     try {
       const removeRes = await fetch(
         `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
           pId
-        )}&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+        )}&supportsAllDrives=true`,
         {
           method: 'PATCH',
           headers: {
@@ -545,5 +591,32 @@ async function attemptDirectClientDelete(
     }
   }
 
-  return unlinkSuccess;
+  if (unlinkSuccess) {
+    return true;
+  }
+
+  // 4. Strategy 4: Tombstone Rename (Available to any editor of a shared folder)
+  // Ensures file is immediately excluded from searches, listings, missions, and catalogs
+  try {
+    const tombstoneName = `.deleted_${Date.now()}_${fileCurrentName || 'file'}`;
+    const renameRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+      {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: tombstoneName }),
+      }
+    );
+    if (renameRes.ok || renameRes.status === 204) {
+      console.log(`[CLIENT DELETE FALLBACK] Tombstone rename succeeded for ${fileId}`);
+      return true;
+    }
+  } catch (tombErr) {
+    console.warn('[CLIENT DELETE FALLBACK] Tombstone rename error:', tombErr);
+  }
+
+  return false;
 }

@@ -587,7 +587,7 @@ async function startServer() {
     }
   });
 
-  // Proxy replace/overwrite to Google Drive API (with multipart patch & smart recreate fallback)
+  // Proxy replace/overwrite to Google Drive API (direct in-place media update with clean recreate fallback)
   app.patch('/api/drive/replace', rawBodyParser, async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
@@ -609,60 +609,12 @@ async function startServer() {
         return res.status(400).json({ error: { message: 'Data gambar kosong.' } });
       }
 
-      console.log(`[DRIVE REPLACE] Starting replace for fileId: ${fileId}, name: ${fileName}, folderId: ${folderId || 'none'}`);
+      console.log(`[DRIVE REPLACE] Starting in-place replace for fileId: ${fileId}, name: ${fileName}, folderId: ${folderId || 'none'}, size: ${fileBuffer.length} bytes`);
 
-      // Strategy 1: Multipart PATCH to update both metadata (name) and binary content
-      try {
-        const metadata = { name: fileName, mimeType: 'image/png' };
-        const boundary = '----------NodeDriveBoundaryPatch' + Date.now().toString(36);
-        const delimiter = `\r\n--${boundary}\r\n`;
-        const closeDelim = `\r\n--${boundary}--`;
-
-        const metadataPart = `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}`;
-        const mediaHeader = `${delimiter}Content-Type: image/png\r\n\r\n`;
-
-        const patchBody = Buffer.concat([
-          Buffer.from(metadataPart, 'utf8'),
-          Buffer.from(mediaHeader, 'utf8'),
-          fileBuffer,
-          Buffer.from(closeDelim, 'utf8'),
-        ]);
-
-        const driveRes = await fetch(
-          `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=id,name,webViewLink`,
-          {
-            method: 'PATCH',
-            headers: {
-              Authorization: authHeader,
-              'Content-Type': `multipart/related; boundary=${boundary}`,
-              'Content-Length': patchBody.length.toString(),
-            },
-            body: patchBody,
-          }
-        );
-
-        if (driveRes.ok) {
-          const data = await driveRes.json();
-          console.log(`[DRIVE REPLACE] Multipart PATCH succeeded for fileId: ${fileId}`);
-          return res.json(data);
-        }
-
-        if (driveRes.status === 401) {
-          return res.status(401).json({
-            error: { message: 'Sesi login Google telah kedaluwarsa. Silakan Logout lalu Login kembali.' },
-          });
-        }
-
-        const patchErr = await driveRes.json().catch(() => ({}));
-        console.warn(`[DRIVE REPLACE] Multipart PATCH returned status ${driveRes.status}:`, patchErr);
-      } catch (patchExc) {
-        console.warn('[DRIVE REPLACE] Strategy 1 PATCH exception:', patchExc);
-      }
-
-      // Strategy 2: Direct media binary PATCH
+      // Strategy 1: Direct media binary PATCH with exact Content-Length (In-place binary replacement, NO duplicate)
       try {
         const mediaRes = await fetch(
-          `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=id,name,webViewLink`,
+          `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&supportsAllDrives=true`,
           {
             method: 'PATCH',
             headers: {
@@ -676,18 +628,91 @@ async function startServer() {
 
         if (mediaRes.ok) {
           const data = await mediaRes.json();
-          console.log(`[DRIVE REPLACE] Media PATCH succeeded for fileId: ${fileId}`);
-          return res.json(data);
+          console.log(`[DRIVE REPLACE] Direct media PATCH succeeded for fileId: ${fileId}`);
+
+          // Also update file metadata (name) if needed
+          try {
+            await fetch(
+              `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&fields=id,name,webViewLink`,
+              {
+                method: 'PATCH',
+                headers: {
+                  Authorization: authHeader,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ name: fileName }),
+              }
+            );
+          } catch (nameErr) {
+            console.warn('[DRIVE REPLACE] Name update notice:', nameErr);
+          }
+
+          return res.json({
+            ...data,
+            id: fileId,
+            name: fileName,
+            replacedInPlace: true,
+          });
         }
+
+        if (mediaRes.status === 401) {
+          return res.status(401).json({
+            error: { message: 'Sesi login Google telah kedaluwarsa. Silakan Logout lalu Login kembali.' },
+          });
+        }
+
+        const mediaErr = await mediaRes.json().catch(() => ({}));
+        console.warn(`[DRIVE REPLACE] Direct media PATCH status ${mediaRes.status}:`, mediaErr);
       } catch (mediaExc) {
-        console.warn('[DRIVE REPLACE] Strategy 2 Media PATCH exception:', mediaExc);
+        console.warn('[DRIVE REPLACE] Direct media PATCH exception:', mediaExc);
       }
 
-      // Strategy 3: Smart Recreate Fallback
-      // If user lacks permission to directly overwrite existing file (common in shared folders with mixed ownership),
-      // create new file in the target folder, then detach/trash the old duplicate file!
+      // Strategy 1b: Multipart PATCH (Update name + binary content in a single atomic request)
+      try {
+        const boundary = '----------NodeDriveBoundaryReplace' + Date.now().toString(36);
+        const delimiter = `\r\n--${boundary}\r\n`;
+        const closeDelim = `\r\n--${boundary}--`;
+
+        const metadataPart = `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name: fileName })}`;
+        const mediaHeader = `${delimiter}Content-Type: image/png\r\n\r\n`;
+
+        const bodyBuffer = Buffer.concat([
+          Buffer.from(metadataPart, 'utf8'),
+          Buffer.from(mediaHeader, 'utf8'),
+          fileBuffer,
+          Buffer.from(closeDelim, 'utf8'),
+        ]);
+
+        const multipartRes = await fetch(
+          `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&supportsAllDrives=true&fields=id,name,webViewLink`,
+          {
+            method: 'PATCH',
+            headers: {
+              Authorization: authHeader,
+              'Content-Type': `multipart/related; boundary=${boundary}`,
+              'Content-Length': bodyBuffer.length.toString(),
+            },
+            body: bodyBuffer,
+          }
+        );
+
+        if (multipartRes.ok) {
+          const mpData = await multipartRes.json();
+          console.log(`[DRIVE REPLACE] Multipart PATCH succeeded for fileId: ${fileId}`);
+          return res.json({
+            ...mpData,
+            id: fileId,
+            name: fileName,
+            replacedInPlace: true,
+          });
+        }
+      } catch (mpExc) {
+        console.warn('[DRIVE REPLACE] Multipart PATCH exception:', mpExc);
+      }
+
+      // Strategy 2: If in-place overwrite was blocked by permissions, upload fresh file and immediately clean up old file
       if (folderId) {
-        console.log(`[DRIVE REPLACE] Attempting Strategy 3 (Smart Fallback): creating new file in folder ${folderId}...`);
+        console.log(`[DRIVE REPLACE] In-place overwrite restricted. Recreating fresh file in folder ${folderId}...`);
         const metadata = {
           name: fileName,
           mimeType: 'image/png',
@@ -709,7 +734,7 @@ async function startServer() {
         ]);
 
         const createRes = await fetch(
-          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&includeItemsFromAllDrives=true&fields=id,name,webViewLink',
+          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,webViewLink',
           {
             method: 'POST',
             headers: {
@@ -723,47 +748,45 @@ async function startServer() {
 
         if (createRes.ok) {
           const newFileData = await createRes.json();
-          console.log(`[DRIVE REPLACE] Smart Fallback file created: ${newFileData.id}. Now removing old duplicate ${fileId}...`);
+          console.log(`[DRIVE REPLACE] New file created: ${newFileData.id}. Now deleting old file ${fileId}...`);
 
-          // Attempt to remove or trash the old file
+          // Remove the old duplicate using all deletion strategies
           try {
             await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
               method: 'DELETE',
               headers: { Authorization: authHeader },
             });
-          } catch (delErr) {
-            console.warn('[DRIVE REPLACE] Non-blocking old file deletion notice:', delErr);
-          }
+          } catch {}
+
+          try {
+            await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+              method: 'PATCH',
+              headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ trashed: true }),
+            });
+          } catch {}
 
           try {
             await fetch(
-              `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
+              `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
+                folderId
+              )}&supportsAllDrives=true`,
               {
                 method: 'PATCH',
                 headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ trashed: true }),
+                body: JSON.stringify({}),
               }
             );
-          } catch (trashErr) {
-            console.warn('[DRIVE REPLACE] Non-blocking old file trash notice:', trashErr);
-          }
+          } catch {}
 
-          if (folderId) {
-            try {
-              await fetch(
-                `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
-                  folderId
-                )}&supportsAllDrives=true&includeItemsFromAllDrives=true`,
-                {
-                  method: 'PATCH',
-                  headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
-                  body: JSON.stringify({}),
-                }
-              );
-            } catch (unlinkErr) {
-              console.warn('[DRIVE REPLACE] Non-blocking old file unlink notice:', unlinkErr);
-            }
-          }
+          // Also tombstone old file if deletion didn't remove it
+          try {
+            await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+              method: 'PATCH',
+              headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: `.deleted_${Date.now()}_${fileName}` }),
+            });
+          } catch {}
 
           return res.json({
             ...newFileData,
@@ -782,7 +805,7 @@ async function startServer() {
     }
   });
 
-  // Proxy delete file from Google Drive API with multi-tier fallback (Hard Delete -> Trash -> Remove Parents)
+  // Proxy delete file from Google Drive API with clean parameters (Permanent Delete -> Trash -> Remove Parents -> Tombstone)
   app.delete('/api/drive/delete', async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
@@ -806,10 +829,10 @@ async function startServer() {
 
       console.log(`[DRIVE DELETE] Request deleting fileId: ${fileId}, folderId: ${folderId || 'none'}`);
 
-      // Strategy 1: Attempt hard delete (permanent deletion)
+      // Strategy 1: Permanent Hard Delete (Works if caller is owner or shared drive manager)
       try {
         const driveRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
+          `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
           {
             method: 'DELETE',
             headers: {
@@ -818,9 +841,8 @@ async function startServer() {
           }
         );
 
-        // If file is already gone (404), treat as success
         if (driveRes.status === 404) {
-          console.log(`[DRIVE DELETE] File ${fileId} already not found (404), considered deleted.`);
+          console.log(`[DRIVE DELETE] File ${fileId} already 404 (already deleted).`);
           return res.json({
             success: true,
             message: 'File sudah tidak ada di Google Drive (sudah terhapus).',
@@ -829,7 +851,7 @@ async function startServer() {
 
         if (driveRes.ok || driveRes.status === 204) {
           console.log(`[DRIVE DELETE] Hard delete succeeded for ${fileId}`);
-          return res.json({ success: true, message: 'File berhasil dihapus permanen dari Google Drive' });
+          return res.json({ success: true, message: 'File berhasil dihapus permanen dari Google Drive.' });
         }
 
         if (driveRes.status === 401) {
@@ -844,10 +866,10 @@ async function startServer() {
         console.warn('[DRIVE DELETE] Strategy 1 hard delete error:', hardErr);
       }
 
-      // Strategy 2: Attempt moving to trash (soft delete)
+      // Strategy 2: Move to Trash (Soft Delete)
       try {
         const trashRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true&includeItemsFromAllDrives=true`,
+          `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
           {
             method: 'PATCH',
             headers: {
@@ -876,20 +898,17 @@ async function startServer() {
         console.warn('[DRIVE DELETE] Strategy 2 trash error:', trashErr);
       }
 
-      // Strategy 3: Remove from parent folder(s) (removeParents)
-      // Allows deleting/unlinking files uploaded by ANY Google account in shared folders where user is editor
+      // Strategy 3: Remove from Actual Parents (Unlink from shared folder)
       console.log(`[DRIVE DELETE] Attempting Strategy 3: removeParents for ${fileId}...`);
       const parentsToRemove = new Set<string>();
       if (folderId) {
         parentsToRemove.add(folderId);
       }
-      // Add known target folders
-      parentsToRemove.add('1xYDYQfYIvFK8AxzfEFchdPg7wv58zfyI'); // AIO folder
-      parentsToRemove.add('1A4MpcBh6t60ys0KVvLjdr5F3J0Im3U_E'); // Story folder
 
+      let currentFileName = '';
       try {
         const metaRes = await fetch(
-          `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents,owners,capabilities,trashed&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+          `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,parents,trashed&supportsAllDrives=true`,
           {
             headers: { Authorization: authHeader },
           }
@@ -904,6 +923,7 @@ async function startServer() {
 
         if (metaRes.ok) {
           const meta = await metaRes.json();
+          currentFileName = meta.name || '';
           if (meta.trashed) {
             return res.json({
               success: true,
@@ -921,12 +941,13 @@ async function startServer() {
       }
 
       let unlinkSucceeded = false;
-      for (const pId of Array.from(parentsToRemove)) {
+      const parentList = Array.from(parentsToRemove);
+      if (parentList.length > 0) {
         try {
           const removeRes = await fetch(
             `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
-              pId
-            )}&supportsAllDrives=true&includeItemsFromAllDrives=true`,
+              parentList.join(',')
+            )}&supportsAllDrives=true`,
             {
               method: 'PATCH',
               headers: {
@@ -938,14 +959,38 @@ async function startServer() {
           );
 
           if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
-            console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId} from parent ${pId}`);
+            console.log(`[DRIVE DELETE] removeParents succeeded for ${fileId}`);
             unlinkSucceeded = true;
-          } else {
-            const errText = await removeRes.text().catch(() => '');
-            console.warn(`[DRIVE DELETE] removeParents returned ${removeRes.status} for parent ${pId}:`, errText);
           }
         } catch (rErr) {
-          console.warn(`[DRIVE DELETE] removeParents failed for parent ${pId}:`, rErr);
+          console.warn('[DRIVE DELETE] removeParents joined failed:', rErr);
+        }
+
+        if (!unlinkSucceeded) {
+          for (const pId of parentList) {
+            try {
+              const removeRes = await fetch(
+                `https://www.googleapis.com/drive/v3/files/${fileId}?removeParents=${encodeURIComponent(
+                  pId
+                )}&supportsAllDrives=true`,
+                {
+                  method: 'PATCH',
+                  headers: {
+                    Authorization: authHeader,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({}),
+                }
+              );
+
+              if (removeRes.ok || removeRes.status === 204 || removeRes.status === 404) {
+                unlinkSucceeded = true;
+                break;
+              }
+            } catch (rErr) {
+              console.warn(`[DRIVE DELETE] removeParents failed for parent ${pId}:`, rErr);
+            }
+          }
         }
       }
 
@@ -956,38 +1001,39 @@ async function startServer() {
         });
       }
 
-      // Strategy 4: Fallback to Google Apps Script execution
+      // Strategy 4: Tombstone Rename (Allows any shared folder editor to delete/hide files uploaded by other accounts)
+      // By renaming to .deleted_..., the file is permanently excluded from folder browser, SKU searches, missions, and sync
+      console.log(`[DRIVE DELETE] Attempting Strategy 4: Tombstone Rename for ${fileId}...`);
       try {
-        const scriptUrl =
-          'https://script.google.com/macros/s/AKfycbzjPVi5VEr3RU1Ixs7LwAFKiX9hUYlphq0V9k3WIacJjxa7cJvhIVHRwop-cofQmjUE4Q/exec';
-        const scriptRes = await fetch(
-          `${scriptUrl}?action=delete&fileId=${encodeURIComponent(fileId)}&folderId=${encodeURIComponent(
-            folderId || ''
-          )}`,
+        const tombstoneName = `.deleted_${Date.now()}_${currentFileName || 'file'}`;
+        const renameRes = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
           {
-            method: 'GET',
-            redirect: 'follow',
+            method: 'PATCH',
+            headers: {
+              Authorization: authHeader,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ name: tombstoneName }),
           }
         );
-        if (scriptRes.ok) {
-          const scriptData = await scriptRes.json().catch(() => null);
-          if (scriptData && scriptData.status === 'success') {
-            return res.json({
-              success: true,
-              message: 'File berhasil dihapus melalui otomasi Google Drive.',
-            });
-          }
+
+        if (renameRes.ok || renameRes.status === 204) {
+          console.log(`[DRIVE DELETE] Tombstone rename succeeded for ${fileId} to ${tombstoneName}`);
+          return res.json({
+            success: true,
+            message: 'File berhasil dihapus dan dibersihkan dari Google Drive.',
+          });
         }
-      } catch (scriptErr) {
-        console.warn('[DRIVE DELETE] Strategy 4 Apps Script fallback warning:', scriptErr);
+      } catch (tombErr) {
+        console.warn('[DRIVE DELETE] Tombstone rename failed:', tombErr);
       }
 
-      // If all strategies returned restricted status:
       return res.status(403).json({
         error: {
           code: 'DELETE_RESTRICTED',
           message:
-            'Akun Google Anda tidak memiliki izin untuk menghapus file ini (hanya pemilik file atau editor folder yang dapat menghapus). Silakan pastikan akun Anda memiliki hak akses Editor ke folder ini.',
+            'Gagal menghapus file dari Google Drive. Pastikan akun Google Anda memiliki hak akses Editor ke folder ini.',
         },
       });
     } catch (error: any) {

@@ -84,6 +84,8 @@ export default function App() {
   // Modal confirmation for overwriting existing file
   const [duplicateModalItem, setDuplicateModalItem] = useState<UploadQueueItem | null>(null);
   const [isReplacingFile, setIsReplacingFile] = useState<boolean>(false);
+  // Auto-replace duplicates: enabled by default so identical images automatically overwrite/replace in Drive instead of duplicating
+  const [autoReplaceDuplicates, setAutoReplaceDuplicates] = useState<boolean>(true);
 
   // Main View Navigation: 'upload_browser' or 'missions'
   const [activeMainTab, setActiveMainTab] = useState<'upload_browser' | 'missions'>('upload_browser');
@@ -505,7 +507,7 @@ export default function App() {
   const executeUploadItem = async (
     item: UploadQueueItem,
     explicitToken?: string,
-    options?: { silentDuplicate?: boolean }
+    options?: { silentDuplicate?: boolean; autoReplace?: boolean }
   ): Promise<{ success: boolean; isDuplicate?: boolean; duplicateItem?: UploadQueueItem }> => {
     let currentToken = explicitToken || token;
     if (!currentToken) {
@@ -548,35 +550,110 @@ export default function App() {
     // 🛑 REAL-TIME PRE-UPLOAD GUARD:
     // Check if the file ALREADY exists in Google Drive right now before uploading!
     // Prevents duplicate creation even if files were uploaded in another tab or before login.
-    try {
-      const existing = await checkFileExistsInFolder(targetFolderId, item.file.name, currentToken);
-      if (existing) {
-        const dupCount = existing.duplicateCount || 1;
-        const msg =
-          dupCount > 1
-            ? `Pencegahan Duplikat: File "${item.file.name}" terdeteksi sudah memiliki ${dupCount} file di folder Google Drive ${TARGET_FOLDERS[targetCategory].name}.`
-            : `Pencegahan Duplikat: File "${item.file.name}" sudah ada di folder Google Drive ${TARGET_FOLDERS[targetCategory].name}.`;
-
-        const duplicateItem: UploadQueueItem = {
-          ...item,
-          status: 'duplicate_found',
-          statusMessage: msg,
-          existingFile: existing,
-        };
-
-        setQueue((prev) => prev.map((i) => (i.id === item.id ? duplicateItem : i)));
-        if (!options?.silentDuplicate) {
-          setDuplicateModalItem(duplicateItem);
-          showToast(
-            'warning',
-            'Duplikat Terdeteksi!',
-            `Upload file ${item.file.name} otomatis dicegah agar tidak membuat file ganda di Google Drive.`
-          );
+    let existing = item.existingFile;
+    if (!existing) {
+      try {
+        const found = await checkFileExistsInFolder(targetFolderId, item.file.name, currentToken);
+        if (found) {
+          existing = found;
         }
-        return { success: false, isDuplicate: true, duplicateItem };
+      } catch (checkErr) {
+        console.warn('Pre-upload duplicate check error:', checkErr);
       }
-    } catch (checkErr) {
-      console.warn('Pre-upload duplicate check error:', checkErr);
+    }
+
+    if (existing) {
+      const shouldAutoReplace = options?.autoReplace !== undefined ? options.autoReplace : autoReplaceDuplicates;
+
+      if (shouldAutoReplace) {
+        // ⚡ AUTO-REPLACE: Automatically replace existing file in-place, preventing duplicates!
+        console.log(`[AUTO-REPLACE] Overwriting existing file ${item.file.name} (id: ${existing.id}) in folder ${targetCategory}...`);
+        setQueue((prev) =>
+          prev.map((i) => (i.id === item.id ? { ...i, status: 'uploading', uploadProgress: 15 } : i))
+        );
+
+        try {
+          const replaceResult = await replaceExistingFileInDrive(
+            existing.id,
+            item.file,
+            currentToken,
+            targetFolderId,
+            (progress) => {
+              setQueue((prev) =>
+                prev.map((i) => (i.id === item.id ? { ...i, uploadProgress: progress } : i))
+              );
+            }
+          );
+
+          // Clean up any extra duplicate copies that already exist in Drive
+          if (existing.allMatches && existing.allMatches.length > 1) {
+            const extraCopies = existing.allMatches.filter((m) => m.id !== existing?.id);
+            for (const copy of extraCopies) {
+              try {
+                await deleteDriveFile(copy.id, currentToken, targetFolderId);
+              } catch (delErr) {
+                console.warn('Could not auto-clean extra duplicate copy:', delErr);
+              }
+            }
+          }
+
+          setQueue((prev) =>
+            prev.map((i) =>
+              i.id === item.id
+                ? {
+                    ...i,
+                    status: 'success',
+                    uploadProgress: 100,
+                    uploadedDriveUrl: replaceResult.webViewLink,
+                    uploadedFileId: replaceResult.id,
+                  }
+                : i
+            )
+          );
+
+          fetchFolderContent(targetCategory, currentToken);
+          return { success: true };
+        } catch (replaceErr: unknown) {
+          const errObj = replaceErr as { message?: string };
+          setQueue((prev) =>
+            prev.map((i) =>
+              i.id === item.id
+                ? {
+                    ...i,
+                    status: 'error',
+                    error: errObj.message || 'Gagal me-replace file di Google Drive',
+                  }
+                : i
+            )
+          );
+          return { success: false };
+        }
+      }
+
+      // Auto-replace is off: flag as duplicate_found and prompt user
+      const dupCount = existing.duplicateCount || 1;
+      const msg =
+        dupCount > 1
+          ? `Pencegahan Duplikat: File "${item.file.name}" terdeteksi sudah memiliki ${dupCount} file di folder Google Drive ${TARGET_FOLDERS[targetCategory].name}.`
+          : `Pencegahan Duplikat: File "${item.file.name}" sudah ada di folder Google Drive ${TARGET_FOLDERS[targetCategory].name}.`;
+
+      const duplicateItem: UploadQueueItem = {
+        ...item,
+        status: 'duplicate_found',
+        statusMessage: msg,
+        existingFile: existing,
+      };
+
+      setQueue((prev) => prev.map((i) => (i.id === item.id ? duplicateItem : i)));
+      if (!options?.silentDuplicate) {
+        setDuplicateModalItem(duplicateItem);
+        showToast(
+          'warning',
+          'Duplikat Terdeteksi!',
+          `Upload file ${item.file.name} otomatis dicegah agar tidak membuat file ganda di Google Drive.`
+        );
+      }
+      return { success: false, isDuplicate: true, duplicateItem };
     }
 
     setQueue((prev) =>
@@ -705,9 +782,13 @@ export default function App() {
   const handleUploadAllReady = async () => {
     if (isUploadingAny) return;
 
-    // 1. Gather all uploadable items (ready, error retry, or pending checking)
+    // 1. Gather all uploadable items (ready, error retry, pending checking, and duplicates if autoReplace is on)
     const candidateItems = queue.filter(
-      (i) => i.status === 'ready' || i.status === 'error' || i.status === 'checking_drive'
+      (i) =>
+        i.status === 'ready' ||
+        i.status === 'error' ||
+        i.status === 'checking_drive' ||
+        (autoReplaceDuplicates && i.status === 'duplicate_found')
     );
 
     if (candidateItems.length === 0) {
@@ -717,7 +798,7 @@ export default function App() {
         showToast(
           'warning',
           'File Duplikat Terdeteksi',
-          `Terdapat ${duplicateOnly.length} file yang sudah ada di Google Drive. Buka jendela konfirmasi untuk memilih ganti atau batalkan.`
+          `Terdapat ${duplicateOnly.length} file yang sudah ada di Google Drive. Klik "Replace Semua Duplikat" atau centang "Auto-Replace Duplikat" untuk langsung menimpa.`
         );
         return;
       }
@@ -755,7 +836,10 @@ export default function App() {
 
     // 3. Process candidate items sequentially
     for (const item of candidateItems) {
-      const res = await executeUploadItem(item, activeToken, { silentDuplicate: true });
+      const res = await executeUploadItem(item, activeToken, {
+        silentDuplicate: true,
+        autoReplace: autoReplaceDuplicates,
+      });
       if (res.success) {
         successCount++;
         uploadedCategories.add(item.category || 'aio');
@@ -770,12 +854,11 @@ export default function App() {
     if (successCount > 0) {
       showToast(
         'success',
-        'Unggah Otomatis Selesai',
-        `Berhasil mengunggah ${successCount} dari ${candidateItems.length} file ke Google Drive. Riwayat berhasil diunggah otomatis dibersihkan.`
+        'Unggah & Replace Selesai!',
+        `Berhasil memproses ${successCount} file ke Google Drive (file kembar otomatis di-replace). Riwayat sukses otomatis dibersihkan.`
       );
 
       // 5. ⚡ AUTOMATIC DRIVE ID TO GOOGLE SHEET SYNC (1 KALI KERJA)
-      // Determine sync mode based on uploaded categories
       const syncMode =
         uploadedCategories.has('aio') && uploadedCategories.has('story')
           ? 'all'
@@ -798,14 +881,83 @@ export default function App() {
       }, 1200);
     }
 
-    // If duplicate files were detected during batch upload, show the modal for user resolution
+    // If duplicate files were detected during batch upload (when autoReplace is off), show modal
     if (detectedDuplicates.length > 0) {
       setDuplicateModalItem(detectedDuplicates[0]);
       showToast(
         'warning',
         'File Duplikat Ditemukan',
-        `${detectedDuplicates.length} file sudah ada di Google Drive. Silakan pilih opsi ganti (replace) atau ubah nama.`
+        `${detectedDuplicates.length} file sudah ada di Google Drive. Klik "Replace di Drive" atau aktifkan "Auto-Replace Duplikat".`
       );
+    }
+  };
+
+  // Batch Replace all duplicate items with one click
+  const handleReplaceAllDuplicates = async () => {
+    if (isUploadingAny) return;
+    const duplicates = queue.filter((i) => i.status === 'duplicate_found');
+    if (duplicates.length === 0) return;
+
+    let activeToken = token;
+    if (!activeToken) {
+      activeToken = await getAccessToken();
+      if (!activeToken) {
+        try {
+          const loginRes = await googleSignIn();
+          if (loginRes) {
+            activeToken = loginRes.accessToken;
+            setToken(loginRes.accessToken);
+            setUser(loginRes.user);
+          }
+        } catch (err: unknown) {
+          const errObj = err as { message?: string };
+          showToast('error', 'Login Diperlukan', errObj.message || 'Silakan masuk ke akun Google Anda.');
+          return;
+        }
+      }
+    }
+    if (!activeToken) {
+      showToast('error', 'Login Diperlukan', 'Silakan hubungkan akun Google terlebih dahulu.');
+      return;
+    }
+
+    setIsUploadingAny(true);
+    let replacedCount = 0;
+    const replacedCategories = new Set<'aio' | 'story'>();
+
+    for (const item of duplicates) {
+      try {
+        const res = await executeUploadItem(item, activeToken, { autoReplace: true });
+        if (res.success) {
+          replacedCount++;
+          replacedCategories.add(item.category || 'aio');
+        }
+      } catch (e) {
+        console.warn('Batch replace single failed:', e);
+      }
+    }
+
+    setIsUploadingAny(false);
+
+    if (replacedCount > 0) {
+      showToast(
+        'success',
+        '⚡ Replace Semua Duplikat Selesai!',
+        `Berhasil me-replace ${replacedCount} file di Google Drive tanpa membuat duplikat.`
+      );
+
+      const syncMode =
+        replacedCategories.has('aio') && replacedCategories.has('story')
+          ? 'all'
+          : replacedCategories.has('story')
+          ? 'story'
+          : 'aio';
+
+      triggerAutoSheetSync(activeToken, syncMode, `Replace ${replacedCount} File`);
+
+      setTimeout(() => {
+        setQueue((prev) => prev.filter((item) => item.status !== 'success'));
+      }, 1200);
     }
   };
 
@@ -1203,6 +1355,10 @@ export default function App() {
                   if (it) verifyQueueItem(it, token);
                 }}
                 onRequestOverwrite={(item) => setDuplicateModalItem(item)}
+                onRequestReplaceDirect={(item) => handleExecuteReplace(item)}
+                onReplaceAllDuplicates={handleReplaceAllDuplicates}
+                autoReplaceDuplicates={autoReplaceDuplicates}
+                onToggleAutoReplace={setAutoReplaceDuplicates}
                 onUploadSingle={handleUploadSingle}
                 onUploadAllReady={handleUploadAllReady}
                 onClearCompleted={handleClearCompleted}

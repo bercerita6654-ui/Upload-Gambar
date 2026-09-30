@@ -34,6 +34,10 @@ interface UploadQueueListProps {
   onRenameItem: (id: string, newFileName: string) => void;
   onRecheckDuplicate: (id: string) => void;
   onRequestOverwrite: (item: UploadQueueItem) => void;
+  onRequestReplaceDirect?: (item: UploadQueueItem) => void;
+  onReplaceAllDuplicates?: () => void;
+  autoReplaceDuplicates?: boolean;
+  onToggleAutoReplace?: (enabled: boolean) => void;
   onUploadSingle: (item: UploadQueueItem) => void;
   onUploadAllReady: () => void;
   onClearCompleted: () => void;
@@ -53,6 +57,10 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
   onRenameItem,
   onRecheckDuplicate,
   onRequestOverwrite,
+  onRequestReplaceDirect,
+  onReplaceAllDuplicates,
+  autoReplaceDuplicates = true,
+  onToggleAutoReplace,
   onUploadSingle,
   onUploadAllReady,
   onClearCompleted,
@@ -138,6 +146,34 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
 
           {/* Master Single Upload Button & Actions */}
           <div className="flex items-center gap-2 self-stretch lg:self-auto justify-end flex-wrap">
+            {onToggleAutoReplace && (
+              <label
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 cursor-pointer select-none transition-colors"
+                title="Ketika aktif, file dengan nama yang sama akan otomatis menimpa (replace) file di Google Drive tanpa membuat duplikat"
+              >
+                <input
+                  type="checkbox"
+                  checked={autoReplaceDuplicates}
+                  onChange={(e) => onToggleAutoReplace(e.target.checked)}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                />
+                <span>Auto-Replace Duplikat</span>
+              </label>
+            )}
+
+            {duplicateItems.length > 0 && onReplaceAllDuplicates && (
+              <button
+                type="button"
+                onClick={onReplaceAllDuplicates}
+                disabled={isUploadingAny || isSyncingSheet}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 active:bg-amber-800 rounded-xl shadow-xs transition-all cursor-pointer disabled:opacity-50"
+                title="Langsung timpa/replace semua file duplikat di Google Drive sekaligus"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Replace Semua Duplikat ({duplicateItems.length})</span>
+              </button>
+            )}
+
             {successItems.length > 0 && (
               <button
                 onClick={onClearCompleted}
@@ -168,28 +204,32 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
               {isUploadingAny ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>Sedang Mengunggah Semua File...</span>
+                  <span>Sedang Memproses Semua File...</span>
                 </>
               ) : isSyncingSheet ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin text-emerald-200" />
                   <span>Menyinkronkan ID ke Sheet...</span>
                 </>
-              ) : uploadableItems.length > 0 ? (
+              ) : uploadableItems.length > 0 || (autoReplaceDuplicates && duplicateItems.length > 0) ? (
                 <>
                   <Upload className="w-4 h-4" />
                   <span>
-                    {aioUploadableCount > 0 && storyUploadableCount > 0
+                    {uploadableItems.length > 0 && duplicateItems.length > 0 && autoReplaceDuplicates
+                      ? `Unggah & Replace Semua (${uploadableItems.length + duplicateItems.length} File)`
+                      : aioUploadableCount > 0 && storyUploadableCount > 0
                       ? `Unggah Otomatis ${uploadableItems.length} File (${aioUploadableCount} AIO 1:1 • ${storyUploadableCount} Story 4:5)`
                       : aioUploadableCount > 0
                       ? `Unggah Otomatis ${uploadableItems.length} File ke AIO (1:1)`
-                      : `Unggah Otomatis ${uploadableItems.length} File ke Story (4:5)`}
+                      : uploadableItems.length > 0
+                      ? `Unggah Otomatis ${uploadableItems.length} File ke Story (4:5)`
+                      : `Replace ${duplicateItems.length} File di Drive`}
                   </span>
                 </>
               ) : duplicateItems.length > 0 ? (
                 <>
                   <AlertTriangle className="w-4 h-4" />
-                  <span>Periksa ${duplicateItems.length} File Duplikat</span>
+                  <span>{duplicateItems.length} File Duplikat (Klik Replace)</span>
                 </>
               ) : successItems.length > 0 && successItems.length === items.length ? (
                 <>
@@ -549,13 +589,25 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                       )}
 
                       {item.status === 'duplicate_found' && (
-                        <button
-                          onClick={() => onRequestOverwrite(item)}
-                          className="px-2.5 py-1.5 text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 rounded-lg transition-colors shadow-xs cursor-pointer"
-                          title="Buka pilihan replace gambar atau cancel"
-                        >
-                          Replace / Cancel
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => onRequestReplaceDirect ? onRequestReplaceDirect(item) : onRequestOverwrite(item)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 active:bg-amber-800 rounded-lg transition-colors shadow-xs cursor-pointer"
+                            title="Langsung timpa (replace) file ini di Google Drive tanpa membuat duplikat"
+                          >
+                            <RefreshCw className="w-3 h-3" />
+                            <span>Replace di Drive</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onRequestOverwrite(item)}
+                            className="px-2 py-1.5 text-xs font-medium text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors cursor-pointer border border-amber-300"
+                            title="Buka perbandingan foto lama vs baru / ganti nama"
+                          >
+                            Detail
+                          </button>
+                        </div>
                       )}
 
                       {item.status === 'success' && item.uploadedDriveUrl && (
@@ -627,11 +679,20 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                         </a>
                       )}
                       <button
-                        onClick={() => onRequestOverwrite(item)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 text-xs shadow-2xs cursor-pointer"
+                        type="button"
+                        onClick={() => onRequestReplaceDirect ? onRequestReplaceDirect(item) : onRequestOverwrite(item)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 active:bg-amber-800 text-xs shadow-2xs cursor-pointer"
+                        title="Timpa file ini di Google Drive sekarang"
                       >
                         <RefreshCw className="w-3 h-3" />
-                        <span>Replace / Cancel</span>
+                        <span>Replace di Drive</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRequestOverwrite(item)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white text-amber-900 border border-amber-300 font-semibold hover:bg-amber-50 text-xs shadow-2xs cursor-pointer"
+                      >
+                        <span>Detail &amp; Bandingkan</span>
                       </button>
                       <button
                         onClick={() => startEditing(item)}
