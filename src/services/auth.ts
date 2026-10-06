@@ -52,7 +52,7 @@ const storeAccessToken = (token: string, email?: string | null) => {
   }
 };
 
-const clearStoredAccessToken = () => {
+export const clearStoredAccessToken = () => {
   try {
     localStorage.removeItem(STORAGE_KEY_TOKEN);
     localStorage.removeItem(STORAGE_KEY_TOKEN_EXPIRY);
@@ -62,7 +62,64 @@ const clearStoredAccessToken = () => {
   }
 };
 
+export const clearAuthToken = () => {
+  cachedAccessToken = null;
+  clearStoredAccessToken();
+};
+
+/**
+ * Checks whether an error is caused by invalid, missing, or expired Google OAuth credentials.
+ */
+export const isAuthError = (err: unknown): boolean => {
+  if (!err) return false;
+  const message =
+    typeof err === 'string'
+      ? err
+      : (err as any)?.message ||
+        (err as any)?.error?.message ||
+        (err as any)?.statusText ||
+        String(err);
+  const status = (err as any)?.status || (err as any)?.statusCode;
+  const code = (err as any)?.code || (err as any)?.error?.code;
+
+  if (
+    status === 401 ||
+    code === 401 ||
+    code === 'UNAUTHORIZED' ||
+    code === 'TOKEN_EXPIRED' ||
+    code === 'UNAUTHENTICATED'
+  ) {
+    return true;
+  }
+
+  return /invalid authentication credentials|Expected OAuth 2 access token|login cookie|devconsole-project|TOKEN_EXPIRED|UNAUTHENTICATED|unauthorized|invalid_token|401|kedaluwarsa|login ulang|Token otorisasi|akses ditolak/i.test(
+    message
+  );
+};
+
+/**
+ * Validates whether the given Google OAuth access token is alive and functional against Google Drive API.
+ */
+export const validateToken = async (token?: string | null): Promise<boolean> => {
+  if (!token) return false;
+  try {
+    const res = await fetch('https://www.googleapis.com/drive/v3/about?fields=user&supportsAllDrives=true', {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (res.status === 401) {
+      clearAuthToken();
+      return false;
+    }
+    return res.ok;
+  } catch {
+    return false;
+  }
+};
+
 let isSigningIn = false;
+let signInPromise: Promise<{ user: User; accessToken: string } | null> | null = null;
 let cachedAccessToken: string | null = getStoredAccessToken();
 
 // Factory function to create provider with smart parameters (login_hint and no repeated consent prompt)
@@ -120,28 +177,37 @@ export const initAuth = (
 export const googleSignIn = async (
   options: { forceConsent?: boolean; customEmail?: string } = {}
 ): Promise<{ user: User; accessToken: string } | null> => {
-  try {
-    isSigningIn = true;
-    const currentUser = auth.currentUser;
-    const hintEmail = options.customEmail || currentUser?.email || localStorage.getItem(STORAGE_KEY_USER_EMAIL);
-    
-    const prov = createGoogleProvider(hintEmail, options.forceConsent);
-    const result = await signInWithPopup(auth, prov);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Gagal mendapatkan token otorisasi dari Google Auth');
-    }
-
-    cachedAccessToken = credential.accessToken;
-    storeAccessToken(cachedAccessToken, result.user.email);
-
-    return { user: result.user, accessToken: cachedAccessToken };
-  } catch (error: unknown) {
-    console.error('Sign in error:', error);
-    throw error;
-  } finally {
-    isSigningIn = false;
+  if (signInPromise) {
+    return signInPromise;
   }
+
+  signInPromise = (async () => {
+    try {
+      isSigningIn = true;
+      const currentUser = auth.currentUser;
+      const hintEmail = options.customEmail || currentUser?.email || localStorage.getItem(STORAGE_KEY_USER_EMAIL);
+      
+      const prov = createGoogleProvider(hintEmail, options.forceConsent);
+      const result = await signInWithPopup(auth, prov);
+      const credential = GoogleAuthProvider.credentialFromResult(result);
+      if (!credential?.accessToken) {
+        throw new Error('Gagal mendapatkan token otorisasi dari Google Auth');
+      }
+
+      cachedAccessToken = credential.accessToken;
+      storeAccessToken(cachedAccessToken, result.user.email);
+
+      return { user: result.user, accessToken: cachedAccessToken };
+    } catch (error: unknown) {
+      console.error('Sign in error:', error);
+      throw error;
+    } finally {
+      isSigningIn = false;
+      signInPromise = null;
+    }
+  })();
+
+  return signInPromise;
 };
 
 export const getAccessToken = async (): Promise<string | null> => {

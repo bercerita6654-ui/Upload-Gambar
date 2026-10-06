@@ -23,11 +23,15 @@ import {
   googleSignIn,
   getAccessToken,
   logout,
+  isAuthError,
+  clearAuthToken,
+  validateToken,
 } from './services/auth';
 import {
   checkFileExistsInFolder,
   uploadPngToDrive,
   replaceExistingFileInDrive,
+  cleanOtherDuplicatesInFolder,
   listFolderFiles,
   deleteDriveFile,
 } from './services/driveService';
@@ -43,6 +47,7 @@ import { UploadDropzone } from './components/UploadDropzone';
 import { UploadQueueList } from './components/UploadQueueList';
 import { DriveFolderBrowser } from './components/DriveFolderBrowser';
 import { ReplaceOrCancelModal } from './components/ReplaceOrCancelModal';
+import { ReauthModal } from './components/ReauthModal';
 import { MissingImagesMissionTracker } from './components/MissingImagesMissionTracker';
 import {
   AlertCircle,
@@ -123,6 +128,65 @@ export default function App() {
       }, 6000);
     },
     []
+  );
+
+  // Re-Authentication Modal State for Auto-Login Prompts
+  const [reauthModal, setReauthModal] = useState<{
+    isOpen: boolean;
+    reason?: string;
+    onSuccess?: (newToken: string) => void;
+  }>({ isOpen: false });
+
+  // Centralized Auto-Login Trigger: Opens 1-click modal if automatic popup was intercepted
+  const triggerAutoReauth = useCallback(
+    (reason: string, onResumeAction?: (newToken: string) => void) => {
+      clearAuthToken();
+      setToken(null);
+      setReauthModal({
+        isOpen: true,
+        reason,
+        onSuccess: (newToken: string) => {
+          setToken(newToken);
+          if (onResumeAction) {
+            onResumeAction(newToken);
+          }
+        },
+      });
+    },
+    []
+  );
+
+  // Centralized Auto-Login Handler when token expires or invalid credentials occur
+  const refreshGoogleAuth = useCallback(
+    async (reason?: string, onResumeAction?: (newToken: string) => void): Promise<string | null> => {
+      clearAuthToken();
+      setToken(null);
+      showToast(
+        'info',
+        'Memperbarui Sesi Google...',
+        reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Menyambungkan kembali akun Google...'
+      );
+      try {
+        const loginRes = await googleSignIn();
+        if (loginRes?.accessToken) {
+          setToken(loginRes.accessToken);
+          setUser(loginRes.user);
+          showToast('success', 'Sesi Berhasil Diperbarui', 'Akun Google berhasil terhubung kembali.');
+          if (onResumeAction) onResumeAction(loginRes.accessToken);
+          return loginRes.accessToken;
+        }
+      } catch (err: unknown) {
+        console.warn('Direct popup login was dismissed or blocked by browser:', err);
+        // Browser popup blocker intercepts async calls without direct user click.
+        // Immediately show the Reauth Modal so user can click to login in 1 second!
+        triggerAutoReauth(
+          reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Silakan klik tombol untuk masuk kembali.',
+          onResumeAction
+        );
+      }
+      return null;
+    },
+    [showToast, triggerAutoReauth]
   );
 
   // 1. Initialize Auth on startup
@@ -455,6 +519,56 @@ export default function App() {
     });
   };
 
+  // Delete file from Google Drive when user clicks delete on uploaded/duplicate item in queue
+  const handleDeleteDriveFile = async (item: UploadQueueItem) => {
+    const fileIdToDelete = item.uploadedFileId || item.existingFile?.id;
+    const targetCategory = item.category || 'aio';
+    const targetFolderConfig = TARGET_FOLDERS[targetCategory];
+
+    let activeToken = token;
+    if (!activeToken) {
+      activeToken = await getAccessToken();
+    }
+
+    if (fileIdToDelete && activeToken) {
+      try {
+        await deleteDriveFile(fileIdToDelete, activeToken, targetFolderConfig.folderId);
+        // Also clean up any extra duplicates from Google Drive
+        if (item.existingFile?.allMatches && item.existingFile.allMatches.length > 1) {
+          for (const copy of item.existingFile.allMatches) {
+            if (copy.id !== fileIdToDelete) {
+              try {
+                await deleteDriveFile(copy.id, activeToken, targetFolderConfig.folderId);
+              } catch {}
+            }
+          }
+        }
+        showToast(
+          'success',
+          'File Dihapus dari Drive',
+          `File "${item.file.name}" telah dihapus dari Google Drive.`
+        );
+        fetchFolderContent(targetCategory, activeToken);
+      } catch (delErr: unknown) {
+        if (isAuthError(delErr)) {
+          refreshGoogleAuth('Kredensial OAuth kedaluwarsa saat menghapus file.', (newToken) => {
+            deleteDriveFile(fileIdToDelete, newToken, targetFolderConfig.folderId).then(() => {
+              showToast('success', 'File Dihapus dari Drive', `File "${item.file.name}" telah dihapus.`);
+              fetchFolderContent(targetCategory, newToken);
+            });
+          });
+          handleRemoveItem(item.id);
+          return;
+        }
+        console.warn('Failed to delete drive file:', delErr);
+        showToast('error', 'Gagal Menghapus di Drive', 'Tidak dapat menghapus file dari Google Drive.');
+      }
+    }
+
+    // Always remove from local queue
+    handleRemoveItem(item.id);
+  };
+
   // Clear completed items from queue
   const handleClearCompleted = () => {
     setQueue((prev) => {
@@ -503,25 +617,18 @@ export default function App() {
     }
   };
 
-  // Single Upload execution with token reuse and duplicate handling options
+  // Single Upload execution with token reuse, duplicate handling, and auto-login retry
   const executeUploadItem = async (
     item: UploadQueueItem,
     explicitToken?: string,
-    options?: { silentDuplicate?: boolean; autoReplace?: boolean }
+    options?: { silentDuplicate?: boolean; autoReplace?: boolean; isAuthRetry?: boolean }
   ): Promise<{ success: boolean; isDuplicate?: boolean; duplicateItem?: UploadQueueItem }> => {
     let currentToken = explicitToken || token;
     if (!currentToken) {
-      try {
-        const loginRes = await googleSignIn();
-        if (!loginRes) return { success: false };
-        currentToken = loginRes.accessToken;
-        setToken(loginRes.accessToken);
-        setUser(loginRes.user);
-      } catch (err: unknown) {
-        const errObj = err as { message?: string };
-        showToast('error', 'Login Diperlukan', errObj.message || 'Silakan masuk ke Google');
-        return { success: false };
-      }
+      currentToken = await refreshGoogleAuth('Masuk ke Google untuk mengunggah file.', (newToken) => {
+        executeUploadItem(item, newToken, options);
+      });
+      if (!currentToken) return { success: false };
     }
 
     const targetCategory = item.category || 'aio';
@@ -558,6 +665,18 @@ export default function App() {
           existing = found;
         }
       } catch (checkErr) {
+        if (isAuthError(checkErr) && !options?.isAuthRetry) {
+          console.log('[AUTO-LOGIN] checkFileExistsInFolder hit auth error, auto-refreshing login...');
+          const freshToken = await refreshGoogleAuth(
+            'Kredensial Google kedaluwarsa. Menyambungkan kembali...',
+            (newToken) => {
+              executeUploadItem(item, newToken, { ...options, isAuthRetry: true });
+            }
+          );
+          if (freshToken) {
+            return executeUploadItem(item, freshToken, { ...options, isAuthRetry: true });
+          }
+        }
         console.warn('Pre-upload duplicate check error:', checkErr);
       }
     }
@@ -597,6 +716,11 @@ export default function App() {
             }
           }
 
+          // Also clean any other files with the exact same name in the folder
+          if (replaceResult?.id) {
+            await cleanOtherDuplicatesInFolder(targetFolderId, item.file.name, replaceResult.id, currentToken);
+          }
+
           setQueue((prev) =>
             prev.map((i) =>
               i.id === item.id
@@ -614,6 +738,18 @@ export default function App() {
           fetchFolderContent(targetCategory, currentToken);
           return { success: true };
         } catch (replaceErr: unknown) {
+          if (isAuthError(replaceErr) && !options?.isAuthRetry) {
+            console.log('[AUTO-LOGIN] replaceExistingFileInDrive hit auth error, auto-refreshing login...');
+            const freshToken = await refreshGoogleAuth(
+              'Kredensial Google kedaluwarsa. Menyambungkan kembali...',
+              (newToken) => {
+                executeUploadItem(item, newToken, { ...options, isAuthRetry: true });
+              }
+            );
+            if (freshToken) {
+              return executeUploadItem(item, freshToken, { ...options, isAuthRetry: true });
+            }
+          }
           const errObj = replaceErr as { message?: string };
           setQueue((prev) =>
             prev.map((i) =>
@@ -691,6 +827,18 @@ export default function App() {
       fetchFolderContent(targetCategory, currentToken);
       return { success: true };
     } catch (err: unknown) {
+      if (isAuthError(err) && !options?.isAuthRetry) {
+        console.log('[AUTO-LOGIN] uploadPngToDrive hit auth error, auto-refreshing login...');
+        const freshToken = await refreshGoogleAuth(
+          'Kredensial Google kedaluwarsa. Menyambungkan kembali...',
+          (newToken) => {
+            executeUploadItem(item, newToken, { ...options, isAuthRetry: true });
+          }
+        );
+        if (freshToken) {
+          return executeUploadItem(item, freshToken, { ...options, isAuthRetry: true });
+        }
+      }
       const errObj = err as { message?: string };
       setQueue((prev) =>
         prev.map((i) =>
@@ -815,18 +963,23 @@ export default function App() {
 
     // 2. Ensure Google Auth Token once before processing the batch
     let activeToken = token;
-    if (!activeToken) {
-      try {
-        const loginRes = await googleSignIn();
-        if (!loginRes) return;
-        activeToken = loginRes.accessToken;
-        setToken(loginRes.accessToken);
-        setUser(loginRes.user);
-      } catch (err: unknown) {
-        const errObj = err as { message?: string };
-        showToast('error', 'Login Google Diperlukan', errObj.message || 'Silakan masuk ke akun Google untuk mengunggah.');
-        return;
+    if (activeToken) {
+      const isValid = await validateToken(activeToken);
+      if (!isValid) {
+        activeToken = null;
+        clearAuthToken();
+        setToken(null);
       }
+    }
+
+    if (!activeToken) {
+      triggerAutoReauth(
+        'Sesi login Google telah kedaluwarsa. Silakan masuk kembali dengan akun Google Anda untuk mengunggah.',
+        () => {
+          handleUploadAllReady();
+        }
+      );
+      return;
     }
 
     setIsUploadingAny(true);
@@ -840,6 +993,11 @@ export default function App() {
         silentDuplicate: true,
         autoReplace: autoReplaceDuplicates,
       });
+      // In case activeToken was refreshed during executeUploadItem
+      const currentLatestToken = await getAccessToken();
+      if (currentLatestToken && currentLatestToken !== activeToken) {
+        activeToken = currentLatestToken;
+      }
       if (res.success) {
         successCount++;
         uploadedCategories.add(item.category || 'aio');
@@ -996,10 +1154,18 @@ export default function App() {
     );
 
     try {
+      let targetFileId = item.existingFile?.id;
+      if (!targetFileId) {
+        const found = await checkFileExistsInFolder(targetFolderId, item.file.name, activeToken);
+        if (found?.id) {
+          targetFileId = found.id;
+        }
+      }
+
       let result;
-      if (item.existingFile?.id) {
+      if (targetFileId) {
         result = await replaceExistingFileInDrive(
-          item.existingFile.id,
+          targetFileId,
           item.file,
           activeToken,
           targetFolderId,
@@ -1041,7 +1207,7 @@ export default function App() {
       let cleanedCount = 0;
       const targetFolderConfig = TARGET_FOLDERS[targetCategory];
       if (item.existingFile?.allMatches && item.existingFile.allMatches.length > 1) {
-        const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== item.existingFile?.id);
+        const extraCopies = item.existingFile.allMatches.filter((m) => m.id !== targetFileId);
         for (const copy of extraCopies) {
           try {
             await deleteDriveFile(copy.id, activeToken, targetFolderConfig?.folderId);
@@ -1050,6 +1216,12 @@ export default function App() {
             console.warn('Could not auto-clean extra duplicate copy:', delErr);
           }
         }
+      }
+
+      // Final deep clean: purge any other files in this folder with the exact same name
+      if (result?.id) {
+        const purged = await cleanOtherDuplicatesInFolder(targetFolderId, item.file.name, result.id, activeToken);
+        cleanedCount += purged;
       }
 
       setDuplicateModalItem(null);
@@ -1078,6 +1250,13 @@ export default function App() {
         });
       }, 1200);
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsReplacingFile(false);
+        refreshGoogleAuth('Kredensial OAuth kedaluwarsa saat me-replace gambar.', (freshToken) => {
+          handleExecuteReplace(item);
+        });
+        return;
+      }
       const errObj = err as { message?: string };
       setIsReplacingFile(false);
       setQueue((prev) =>
@@ -1189,6 +1368,13 @@ export default function App() {
 
       fetchFolderContent(targetCategory, activeToken);
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        setIsDeletingFromModal(false);
+        const freshToken = await refreshGoogleAuth('Kredensial OAuth kedaluwarsa. Menyambungkan kembali...');
+        if (freshToken) {
+          return handleDeleteExistingFromModal(item);
+        }
+      }
       const errObj = err as { message?: string };
       showToast(
         'error',
@@ -1364,6 +1550,12 @@ export default function App() {
                 onClearCompleted={handleClearCompleted}
                 onClearAll={handleClearAll}
                 onToggleCategory={handleToggleCategory}
+                onReauthAndRetry={(item) => {
+                  refreshGoogleAuth('Kredensial Google kedaluwarsa. Silakan masuk kembali.', (newToken) => {
+                    executeUploadItem(item, newToken);
+                  });
+                }}
+                onDeleteDriveFile={handleDeleteDriveFile}
                 isUploadingAny={isUploadingAny}
                 isSyncingSheet={isSyncingSheet}
                 syncFeedback={syncFeedback}
@@ -1385,6 +1577,7 @@ export default function App() {
                 token={token}
                 onRefresh={() => fetchFolderContent(activeBrowserFolder, token)}
                 onShowToast={showToast}
+                onRequestReauth={(reason, onSuccess) => triggerAutoReauth(reason, onSuccess)}
                 skuMap={skuMap}
               />
             )}
@@ -1430,6 +1623,21 @@ export default function App() {
         isProcessing={isReplacingFile}
         isDeletingExisting={isDeletingFromModal}
         skuMap={skuMap}
+      />
+
+      {/* Modal Dialog Auto-Login Re-Authentication saat Token Google Invalid/Kedaluwarsa */}
+      <ReauthModal
+        isOpen={reauthModal.isOpen}
+        userEmail={user?.email}
+        reason={reauthModal.reason}
+        onSuccess={(newToken) => {
+          setToken(newToken);
+          setReauthModal({ isOpen: false });
+          if (reauthModal.onSuccess) {
+            reauthModal.onSuccess(newToken);
+          }
+        }}
+        onClose={() => setReauthModal({ isOpen: false })}
       />
     </div>
   );

@@ -3,7 +3,7 @@ import { DriveFileInfo, FolderCategory } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
 import { SyncDriveButton } from './SyncDriveButton';
 import { deleteDriveFile } from '../services/driveService';
-import { getAccessToken } from '../services/auth';
+import { getAccessToken, googleSignIn, isAuthError, clearAuthToken } from '../services/auth';
 import { lookupProductName } from '../services/productCatalogService';
 import {
   Boxes,
@@ -34,6 +34,7 @@ interface DriveFolderBrowserProps {
   token?: string | null;
   onRefresh: () => void;
   onShowToast?: (type: 'success' | 'error' | 'info' | 'warning', title: string, message: string) => void;
+  onRequestReauth?: (reason: string, onSuccess: (token: string) => void) => void;
   skuMap?: Record<string, string>;
 }
 
@@ -46,6 +47,7 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
   token,
   onRefresh,
   onShowToast,
+  onRequestReauth,
   skuMap,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -169,6 +171,37 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
       setFileToDelete(null);
       onRefresh();
     } catch (err: unknown) {
+      if (isAuthError(err)) {
+        clearAuthToken();
+        try {
+          const loginRes = await googleSignIn();
+          if (loginRes?.accessToken) {
+            await deleteDriveFile(fileToDelete.id, loginRes.accessToken, targetConfig.folderId);
+            onShowToast?.(
+              'success',
+              'File Berhasil Dihapus',
+              `File "${fileToDelete.name}" telah berhasil dihapus dari Google Drive.`
+            );
+            setFileToDelete(null);
+            onRefresh();
+            return;
+          }
+        } catch {
+          if (onRequestReauth) {
+            onRequestReauth('Sesi login Google telah kedaluwarsa. Silakan masuk kembali untuk menghapus file.', async (newToken) => {
+              try {
+                await deleteDriveFile(fileToDelete.id, newToken, targetConfig.folderId);
+                onShowToast?.('success', 'File Berhasil Dihapus', `File "${fileToDelete.name}" telah dihapus.`);
+                setFileToDelete(null);
+                onRefresh();
+              } catch (delErr: any) {
+                onShowToast?.('error', 'Gagal Menghapus File', delErr?.message || 'Gagal menghapus file.');
+              }
+            });
+            return;
+          }
+        }
+      }
       const errObj = err as { message?: string };
       onShowToast?.(
         'error',
@@ -221,6 +254,18 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
         await deleteDriveFile(file.id, activeToken, targetConfig.folderId);
         deletedCount++;
       } catch (err) {
+        if (isAuthError(err)) {
+          clearAuthToken();
+          try {
+            const loginRes = await googleSignIn();
+            if (loginRes?.accessToken) {
+              activeToken = loginRes.accessToken;
+              await deleteDriveFile(file.id, activeToken, targetConfig.folderId);
+              deletedCount++;
+              continue;
+            }
+          } catch {}
+        }
         console.warn(`Failed to delete duplicate ${file.name} (${file.id}):`, err);
         failedCount++;
       }

@@ -1,4 +1,5 @@
 import { DriveFileInfo } from '../types';
+import { isAuthError } from './auth';
 
 /**
  * Searches if a file with the given name already exists in the target folder.
@@ -101,7 +102,12 @@ export function uploadPngToDrive(
             resolve({ id: 'done', name: fileName });
           }
         } else if (xhr.status === 401) {
-          reject(new Error('Sesi otorisasi Google kedaluwarsa. Silakan klik Keluar lalu Masuk kembali.'));
+          try {
+            const errRes = JSON.parse(xhr.responseText);
+            reject(new Error(errRes?.error?.message || 'Request had invalid authentication credentials. Expected OAuth 2 access token.'));
+          } catch {
+            reject(new Error('Request had invalid authentication credentials. Expected OAuth 2 access token.'));
+          }
         } else if (xhr.status === 404 || xhr.status >= 500) {
           // Server route might not be reached, try client fallback
           try {
@@ -311,7 +317,11 @@ export async function replaceExistingFileInDrive(
     );
 
     return result;
-  } catch (err) {
+  } catch (err: unknown) {
+    if (isAuthError(err)) {
+      throw err;
+    }
+
     console.warn('[REPLACE FALLBACK] Server PATCH failed, attempting client-side direct media patch...', err);
 
     // Client fallback 1: Direct media binary PATCH to Google Drive API with Content-Length
@@ -328,6 +338,10 @@ export async function replaceExistingFileInDrive(
           body: file,
         }
       );
+
+      if (directRes.status === 401) {
+        throw new Error('Request had invalid authentication credentials. Expected OAuth 2 access token.');
+      }
 
       if (directRes.ok) {
         const directData = await directRes.json();
@@ -350,21 +364,65 @@ export async function replaceExistingFileInDrive(
         };
       }
     } catch (directErr) {
+      if (isAuthError(directErr)) throw directErr;
       console.warn('[REPLACE FALLBACK] Direct client media PATCH failed:', directErr);
     }
 
     if (effectiveFolderId) {
-      // Client-side fallback 2: delete old duplicate file first, then upload new file to target folder
+      // Client-side fallback 2: Safely rename/isolate old file FIRST so it never duplicates
+      try {
+        await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: `.replaced_${Date.now()}_${file.name}` }),
+        });
+      } catch {}
+
       try {
         await deleteDriveFile(fileId, token, effectiveFolderId);
       } catch (delErr) {
         console.warn('[REPLACE FALLBACK] Old duplicate file deletion error (non-fatal):', delErr);
       }
+
       const uploaded = await uploadPngToDrive(effectiveFolderId, file, token, file.name, onProgress);
       return uploaded;
     }
 
     throw err;
+  }
+}
+
+/**
+ * Searches for any other duplicate files with the same name in the folder and deletes them,
+ * ensuring only the primary replaced file remains.
+ */
+export async function cleanOtherDuplicatesInFolder(
+  folderId: string,
+  fileName: string,
+  keepFileId: string,
+  token: string
+): Promise<number> {
+  try {
+    const existing = await checkFileExistsInFolder(folderId, fileName, token);
+    if (!existing || !existing.allMatches || existing.allMatches.length <= 1) {
+      return 0;
+    }
+    const copiesToDelete = existing.allMatches.filter((m) => m.id !== keepFileId);
+    let cleaned = 0;
+    for (const copy of copiesToDelete) {
+      try {
+        await deleteDriveFile(copy.id, token, folderId);
+        cleaned++;
+      } catch (err) {
+        console.warn(`Could not delete duplicate copy ${copy.id}:`, err);
+      }
+    }
+    return cleaned;
+  } catch {
+    return 0;
   }
 }
 

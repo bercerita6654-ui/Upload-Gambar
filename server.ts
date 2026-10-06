@@ -710,9 +710,24 @@ async function startServer() {
         console.warn('[DRIVE REPLACE] Multipart PATCH exception:', mpExc);
       }
 
-      // Strategy 2: If in-place overwrite was blocked by permissions, upload fresh file and immediately clean up old file
+      // Strategy 2: If in-place overwrite was blocked by permissions, safely rename/remove old file first, then create new file
       if (folderId) {
-        console.log(`[DRIVE REPLACE] In-place overwrite restricted. Recreating fresh file in folder ${folderId}...`);
+        console.log(`[DRIVE REPLACE] In-place overwrite restricted. Preparing safe recreate without duplication for folder ${folderId}...`);
+
+        // Step 1: Pre-emptively rename/isolate old file so it NEVER conflicts or duplicates with the new file
+        let oldFileRenamed = false;
+        try {
+          const renameRes = await fetch(
+            `https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`,
+            {
+              method: 'PATCH',
+              headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: `.replaced_${Date.now()}_${fileName}` }),
+            }
+          );
+          if (renameRes.ok) oldFileRenamed = true;
+        } catch {}
+
         const metadata = {
           name: fileName,
           mimeType: 'image/png',
@@ -748,7 +763,7 @@ async function startServer() {
 
         if (createRes.ok) {
           const newFileData = await createRes.json();
-          console.log(`[DRIVE REPLACE] New file created: ${newFileData.id}. Now deleting old file ${fileId}...`);
+          console.log(`[DRIVE REPLACE] New file created: ${newFileData.id}. Cleaning up old file ${fileId}...`);
 
           // Remove the old duplicate using all deletion strategies
           try {
@@ -779,7 +794,7 @@ async function startServer() {
             );
           } catch {}
 
-          // Also tombstone old file if deletion didn't remove it
+          // Final tombstone if still present
           try {
             await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?supportsAllDrives=true`, {
               method: 'PATCH',

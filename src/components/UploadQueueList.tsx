@@ -5,6 +5,7 @@ import {
 } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
 import { lookupProductName } from '../services/productCatalogService';
+import { isAuthError } from '../services/auth';
 import {
   CheckCircle2,
   AlertTriangle,
@@ -24,6 +25,7 @@ import {
   ArrowRightLeft,
   Sparkles,
   Layers,
+  LogIn,
 } from 'lucide-react';
 
 interface UploadQueueListProps {
@@ -43,6 +45,8 @@ interface UploadQueueListProps {
   onClearCompleted: () => void;
   onClearAll: () => void;
   onToggleCategory?: (id: string) => void;
+  onReauthAndRetry?: (item: UploadQueueItem) => void;
+  onDeleteDriveFile?: (item: UploadQueueItem) => void;
   isUploadingAny: boolean;
   isSyncingSheet?: boolean;
   syncFeedback?: string | null;
@@ -66,6 +70,8 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
   onClearCompleted,
   onClearAll,
   onToggleCategory,
+  onReauthAndRetry,
+  onDeleteDriveFile,
   isUploadingAny,
   isSyncingSheet = false,
   syncFeedback = null,
@@ -635,9 +641,27 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
 
                       {item.status !== 'uploading' && (
                         <button
-                          onClick={() => onRemoveItem(item.id)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
-                          title="Hapus dari antrean"
+                          onClick={() => {
+                            if (item.status === 'success' || item.uploadedFileId) {
+                              if (onDeleteDriveFile) {
+                                onDeleteDriveFile(item);
+                              } else {
+                                onRemoveItem(item.id);
+                              }
+                            } else {
+                              onRemoveItem(item.id);
+                            }
+                          }}
+                          className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                            item.status === 'success' || item.uploadedFileId
+                              ? 'text-red-500 hover:text-red-700 hover:bg-red-50'
+                              : 'text-slate-400 hover:text-red-600 hover:bg-red-50'
+                          }`}
+                          title={
+                            item.status === 'success' || item.uploadedFileId
+                              ? 'Hapus file ini dari Google Drive dan antrean'
+                              : 'Hapus dari antrean'
+                          }
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -666,7 +690,7 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto flex-wrap">
                       {item.existingFile?.webViewLink && (
                         <a
                           href={item.existingFile.webViewLink}
@@ -682,11 +706,22 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                         type="button"
                         onClick={() => onRequestReplaceDirect ? onRequestReplaceDirect(item) : onRequestOverwrite(item)}
                         className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-amber-600 text-white font-bold hover:bg-amber-700 active:bg-amber-800 text-xs shadow-2xs cursor-pointer"
-                        title="Timpa file ini di Google Drive sekarang"
+                        title="Timpa (replace) file ini di Google Drive tanpa membuat duplikat"
                       >
                         <RefreshCw className="w-3 h-3" />
                         <span>Replace di Drive</span>
                       </button>
+                      {item.existingFile && onDeleteDriveFile && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteDriveFile(item)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-100 text-red-800 border border-red-300 font-bold hover:bg-red-600 hover:text-white text-xs shadow-2xs cursor-pointer transition-colors"
+                          title="Hapus file duplicate lama yang ada di Google Drive"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>Hapus di Drive</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => onRequestOverwrite(item)}
@@ -726,23 +761,47 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
                   </div>
                 )}
 
-                {/* ERROR NOTIFICATION */}
+                {/* ERROR NOTIFICATION: SPECIAL AUTH ERROR VS GENERAL ERROR */}
                 {item.status === 'error' && item.error && (
-                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-start justify-between gap-2">
-                    <div className="flex items-start gap-2">
-                      <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                      <div>
-                        <p className="font-semibold">Gagal Mengunggah:</p>
-                        <p className="text-red-700 mt-0.5">{item.error}</p>
+                  isAuthError(item.error) ? (
+                    <div className="mt-3 p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs animate-in fade-in">
+                      <div className="flex items-start gap-2.5">
+                        <div className="p-1.5 bg-amber-200/80 rounded-lg shrink-0 mt-0.5 text-amber-900">
+                          <LogIn className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-amber-950 text-sm">Sesi Google Perlu Login Ulang</p>
+                          <p className="text-amber-800 mt-0.5 leading-relaxed">
+                            Kredensial akses Google Drive telah kedaluwarsa atau tidak valid (OAuth 2 access token). Klik tombol login untuk menyambungkan akun dan mengunggah secara otomatis.
+                          </p>
+                        </div>
                       </div>
+                      <button
+                        type="button"
+                        onClick={() => onReauthAndRetry ? onReauthAndRetry(item) : onUploadSingle(item)}
+                        className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-xs shadow-md transition-all cursor-pointer"
+                      >
+                        <LogIn className="w-3.5 h-3.5" />
+                        <span>Login Google &amp; Unggah Otomatis</span>
+                      </button>
                     </div>
-                    <button
-                      onClick={() => onRecheckDuplicate(item.id)}
-                      className="shrink-0 px-2.5 py-1 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 text-xs cursor-pointer"
-                    >
-                      Coba Lagi
-                    </button>
-                  </div>
+                  ) : (
+                    <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        <XCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-semibold">Gagal Mengunggah:</p>
+                          <p className="text-red-700 mt-0.5">{item.error}</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => onRecheckDuplicate(item.id)}
+                        className="shrink-0 px-2.5 py-1 rounded-lg bg-red-600 text-white font-bold hover:bg-red-700 text-xs cursor-pointer"
+                      >
+                        Coba Lagi
+                      </button>
+                    </div>
+                  )
                 )}
               </div>
             );
