@@ -26,6 +26,7 @@ import {
   isAuthError,
   clearAuthToken,
   validateToken,
+  refreshAccessTokenSilently,
 } from './services/auth';
 import {
   checkFileExistsInFolder,
@@ -140,32 +141,53 @@ export default function App() {
   // Centralized Auto-Login Trigger: Opens 1-click modal if automatic popup was intercepted
   const triggerAutoReauth = useCallback(
     (reason: string, onResumeAction?: (newToken: string) => void) => {
-      clearAuthToken();
-      setToken(null);
       setReauthModal({
         isOpen: true,
         reason,
         onSuccess: (newToken: string) => {
           setToken(newToken);
+          showToast('success', 'Akun Google Terhubung', 'Sesi Google Anda berhasil disambungkan kembali.');
+          // Restore any queue items that were paused with auth error
+          setQueue((prev) =>
+            prev.map((i) =>
+              i.status === 'error' && isAuthError(i.error)
+                ? { ...i, status: 'ready', error: undefined }
+                : i
+            )
+          );
           if (onResumeAction) {
             onResumeAction(newToken);
           }
         },
       });
     },
-    []
+    [showToast]
   );
 
   // Centralized Auto-Login Handler when token expires or invalid credentials occur
   const refreshGoogleAuth = useCallback(
     async (reason?: string, onResumeAction?: (newToken: string) => void): Promise<string | null> => {
-      clearAuthToken();
-      setToken(null);
+      // ⚡ Step 1: Attempt completely silent background refresh via Google Identity Services
+      try {
+        console.log('[AUTO-LOGIN] Attempting silent OAuth token renewal...');
+        const silentToken = await refreshAccessTokenSilently();
+        if (silentToken) {
+          setToken(silentToken);
+          showToast('success', 'Sesi Google Diperbarui Otomatis', 'Kredensial Google berhasil diperbarui di latar belakang.');
+          if (onResumeAction) onResumeAction(silentToken);
+          return silentToken;
+        }
+      } catch (silentErr) {
+        console.warn('Silent token renewal could not complete:', silentErr);
+      }
+
+      // Step 2: Inform user and attempt popup or modal
       showToast(
         'info',
         'Memperbarui Sesi Google...',
         reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Menyambungkan kembali akun Google...'
       );
+
       try {
         const loginRes = await googleSignIn();
         if (loginRes?.accessToken) {
@@ -178,7 +200,7 @@ export default function App() {
       } catch (err: unknown) {
         console.warn('Direct popup login was dismissed or blocked by browser:', err);
         // Browser popup blocker intercepts async calls without direct user click.
-        // Immediately show the Reauth Modal so user can click to login in 1 second!
+        // Immediately show the Reauth Modal so user can click to login with genuine gesture!
         triggerAutoReauth(
           reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Silakan klik tombol untuk masuk kembali.',
           onResumeAction
@@ -189,13 +211,17 @@ export default function App() {
     [showToast, triggerAutoReauth]
   );
 
-  // 1. Initialize Auth on startup
+  // 1. Initialize Auth on startup with persistent user session
   useEffect(() => {
     const unsubscribe = initAuth(
       (currentUser, currentToken) => {
         setUser(currentUser);
         setToken(currentToken);
         setAuthError(null);
+      },
+      (currentUser) => {
+        // Firebase user session is active, keeping user identity
+        setUser(currentUser);
       },
       () => {
         setUser(null);
@@ -667,8 +693,19 @@ export default function App() {
       } catch (checkErr) {
         if (isAuthError(checkErr) && !options?.isAuthRetry) {
           console.log('[AUTO-LOGIN] checkFileExistsInFolder hit auth error, auto-refreshing login...');
+          setQueue((prev) =>
+            prev.map((i) =>
+              i.id === item.id
+                ? {
+                    ...i,
+                    status: 'checking_drive',
+                    statusMessage: 'Menyambungkan kembali akun Google...',
+                  }
+                : i
+            )
+          );
           const freshToken = await refreshGoogleAuth(
-            'Kredensial Google kedaluwarsa. Menyambungkan kembali...',
+            'Kredensial Google kedaluwarsa. Menyambungkan kembali akun Google...',
             (newToken) => {
               executeUploadItem(item, newToken, { ...options, isAuthRetry: true });
             }
@@ -738,10 +775,21 @@ export default function App() {
           fetchFolderContent(targetCategory, currentToken);
           return { success: true };
         } catch (replaceErr: unknown) {
-          if (isAuthError(replaceErr) && !options?.isAuthRetry) {
+          if (isAuthError(replaceErr)) {
             console.log('[AUTO-LOGIN] replaceExistingFileInDrive hit auth error, auto-refreshing login...');
+            setQueue((prev) =>
+              prev.map((i) =>
+                i.id === item.id
+                  ? {
+                      ...i,
+                      status: 'checking_drive',
+                      statusMessage: 'Menyambungkan kembali akun Google...',
+                    }
+                  : i
+              )
+            );
             const freshToken = await refreshGoogleAuth(
-              'Kredensial Google kedaluwarsa. Menyambungkan kembali...',
+              'Kredensial Google kedaluwarsa saat me-replace file. Menyambungkan kembali...',
               (newToken) => {
                 executeUploadItem(item, newToken, { ...options, isAuthRetry: true });
               }
@@ -749,6 +797,7 @@ export default function App() {
             if (freshToken) {
               return executeUploadItem(item, freshToken, { ...options, isAuthRetry: true });
             }
+            return { success: false };
           }
           const errObj = replaceErr as { message?: string };
           setQueue((prev) =>
@@ -827,10 +876,21 @@ export default function App() {
       fetchFolderContent(targetCategory, currentToken);
       return { success: true };
     } catch (err: unknown) {
-      if (isAuthError(err) && !options?.isAuthRetry) {
+      if (isAuthError(err)) {
         console.log('[AUTO-LOGIN] uploadPngToDrive hit auth error, auto-refreshing login...');
+        setQueue((prev) =>
+          prev.map((i) =>
+            i.id === item.id
+              ? {
+                  ...i,
+                  status: 'checking_drive',
+                  statusMessage: 'Menyambungkan kembali akun Google...',
+                }
+              : i
+          )
+        );
         const freshToken = await refreshGoogleAuth(
-          'Kredensial Google kedaluwarsa. Menyambungkan kembali...',
+          'Kredensial Google kedaluwarsa saat mengunggah. Menyambungkan kembali akun...',
           (newToken) => {
             executeUploadItem(item, newToken, { ...options, isAuthRetry: true });
           }
@@ -838,6 +898,7 @@ export default function App() {
         if (freshToken) {
           return executeUploadItem(item, freshToken, { ...options, isAuthRetry: true });
         }
+        return { success: false };
       }
       const errObj = err as { message?: string };
       setQueue((prev) =>
@@ -966,10 +1027,17 @@ export default function App() {
     if (activeToken) {
       const isValid = await validateToken(activeToken);
       if (!isValid) {
-        activeToken = null;
-        clearAuthToken();
-        setToken(null);
+        // Attempt completely silent background renewal via GIS first!
+        const silentlyRenewed = await refreshAccessTokenSilently();
+        if (silentlyRenewed) {
+          activeToken = silentlyRenewed;
+          setToken(silentlyRenewed);
+        } else {
+          activeToken = null;
+        }
       }
+    } else {
+      activeToken = await getAccessToken();
     }
 
     if (!activeToken) {

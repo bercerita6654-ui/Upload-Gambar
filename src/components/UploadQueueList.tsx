@@ -763,7 +763,7 @@ export const UploadQueueList: React.FC<UploadQueueListProps> = ({
 
                 {/* ERROR NOTIFICATION: SPECIAL AUTH ERROR VS GENERAL ERROR */}
                 {item.status === 'error' && item.error && (
-                  isAuthError(item.error) ? (
+                  (isAuthError(item.error) || /OAuth|credential|unauthenticated|unauthorized|401/i.test(item.error)) ? (
                     <div className="mt-3 p-3.5 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs animate-in fade-in">
                       <div className="flex items-start gap-2.5">
                         <div className="p-1.5 bg-amber-200/80 rounded-lg shrink-0 mt-0.5 text-amber-900">

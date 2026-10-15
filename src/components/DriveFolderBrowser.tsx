@@ -3,7 +3,7 @@ import { DriveFileInfo, FolderCategory } from '../types';
 import { TARGET_FOLDERS } from '../config/driveConfig';
 import { SyncDriveButton } from './SyncDriveButton';
 import { deleteDriveFile } from '../services/driveService';
-import { getAccessToken, googleSignIn, isAuthError, clearAuthToken } from '../services/auth';
+import { getAccessToken, googleSignIn, isAuthError, clearAuthToken, refreshAccessTokenSilently } from '../services/auth';
 import { lookupProductName } from '../services/productCatalogService';
 import {
   Boxes,
@@ -172,7 +172,22 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
       onRefresh();
     } catch (err: unknown) {
       if (isAuthError(err)) {
-        clearAuthToken();
+        // Attempt completely silent refresh first
+        const silentToken = await refreshAccessTokenSilently();
+        if (silentToken) {
+          try {
+            await deleteDriveFile(fileToDelete.id, silentToken, targetConfig.folderId);
+            onShowToast?.(
+              'success',
+              'File Berhasil Dihapus',
+              `File "${fileToDelete.name}" telah berhasil dihapus dari Google Drive.`
+            );
+            setFileToDelete(null);
+            onRefresh();
+            return;
+          } catch {}
+        }
+
         try {
           const loginRes = await googleSignIn();
           if (loginRes?.accessToken) {
@@ -255,7 +270,16 @@ export const DriveFolderBrowser: React.FC<DriveFolderBrowserProps> = ({
         deletedCount++;
       } catch (err) {
         if (isAuthError(err)) {
-          clearAuthToken();
+          // Attempt silent refresh first
+          const silentToken = await refreshAccessTokenSilently();
+          if (silentToken) {
+            activeToken = silentToken;
+            try {
+              await deleteDriveFile(file.id, activeToken, targetConfig.folderId);
+              deletedCount++;
+              continue;
+            } catch {}
+          }
           try {
             const loginRes = await googleSignIn();
             if (loginRes?.accessToken) {
