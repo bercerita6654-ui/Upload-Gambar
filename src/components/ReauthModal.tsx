@@ -25,7 +25,6 @@ export const ReauthModal: React.FC<ReauthModalProps> = ({
   const handleSignIn = async () => {
     setIsLoggingIn(true);
     setErrorMsg(null);
-    clearAuthToken();
 
     try {
       // Direct click handler provides 100% genuine user gesture for popup

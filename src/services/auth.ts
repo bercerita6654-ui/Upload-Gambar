@@ -21,10 +21,10 @@ const STORAGE_KEY_TOKEN_EXPIRY = 'drive_token_expiry';
 let cachedAccessToken: string | null = null;
 let isSigningIn = false;
 let signInPromise: Promise<{ user: User; accessToken: string } | null> | null = null;
-let silentRefreshPromise: Promise<string | null> | null = null;
-let keepAliveTimer: NodeJS.Timeout | null = null;
 
-// Helper to get cached token from localStorage
+/**
+ * Helper to get cached token from localStorage if not expired
+ */
 export const getStoredAccessToken = (): string | null => {
   try {
     const token = localStorage.getItem(STORAGE_KEY_TOKEN);
@@ -33,8 +33,8 @@ export const getStoredAccessToken = (): string | null => {
 
     if (expiryStr) {
       const expiry = parseInt(expiryStr, 10);
-      // Only discard if past expiration by more than 5 minutes
-      if (Date.now() > expiry + 300000) {
+      // If token expired, clear it and return null
+      if (Date.now() > expiry) {
         return null;
       }
     }
@@ -137,85 +137,19 @@ export const validateToken = async (token?: string | null): Promise<boolean> => 
 };
 
 /**
- * Attempts silent background token refresh via Google Identity Services (GIS).
- * If user already granted permission, GIS can renew access token without prompting.
+ * Safe fallback for silent refresh that avoids origin_mismatch and popup loops.
+ * Checks whether valid stored token exists.
  */
 export const refreshAccessTokenSilently = async (): Promise<string | null> => {
-  if (silentRefreshPromise) return silentRefreshPromise;
-
-  silentRefreshPromise = (async () => {
-    try {
-      if (typeof window === 'undefined') return null;
-
-      // Check if GIS library is available on window
-      const google = (window as any).google;
-      if (!google?.accounts?.oauth2) {
-        return null;
-      }
-
-      const email =
-        auth.currentUser?.email ||
-        localStorage.getItem(STORAGE_KEY_USER_EMAIL) ||
-        '';
-
-      return await new Promise<string | null>((resolve) => {
-        let isSettled = false;
-        const timer = setTimeout(() => {
-          if (!isSettled) {
-            isSettled = true;
-            resolve(null);
-          }
-        }, 5000);
-
-        try {
-          const client = google.accounts.oauth2.initTokenClient({
-            client_id: (firebaseConfig as any).oAuthClientId || '',
-            scope: DRIVE_SCOPES.join(' '),
-            hint: email || undefined,
-            prompt: '', // Silent renew with existing consent
-            callback: (res: any) => {
-              if (isSettled) return;
-              isSettled = true;
-              clearTimeout(timer);
-
-              if (res?.access_token) {
-                console.log('[AUTH] Silent OAuth token refresh succeeded!');
-                storeAccessToken(res.access_token, email, res.expires_in || 3600);
-                resolve(res.access_token);
-              } else {
-                resolve(null);
-              }
-            },
-            error_callback: (err: any) => {
-              if (isSettled) return;
-              isSettled = true;
-              clearTimeout(timer);
-              console.warn('[AUTH] Silent OAuth token refresh failed:', err);
-              resolve(null);
-            },
-          });
-
-          client.requestAccessToken({ prompt: '' });
-        } catch (initErr) {
-          if (!isSettled) {
-            isSettled = true;
-            clearTimeout(timer);
-            console.warn('[AUTH] Failed to initialize GIS client:', initErr);
-            resolve(null);
-          }
-        }
-      });
-    } catch {
-      return null;
-    } finally {
-      silentRefreshPromise = null;
-    }
-  })();
-
-  return silentRefreshPromise;
+  const stored = getStoredAccessToken();
+  if (stored) {
+    cachedAccessToken = stored;
+    return stored;
+  }
+  return null;
 };
 
-// Factory function to create provider with smart parameters (login_hint and no repeated consent prompt)
+// Factory function to create provider with smart parameters (login_hint and scopes)
 const createGoogleProvider = (loginHintEmail?: string | null, forceConsent = false): GoogleAuthProvider => {
   const prov = new GoogleAuthProvider();
   DRIVE_SCOPES.forEach((scope) => prov.addScope(scope));
@@ -236,43 +170,14 @@ const createGoogleProvider = (loginHintEmail?: string | null, forceConsent = fal
 };
 
 /**
- * Initializes Firebase auth state change listener and proactive token keep-alive.
+ * Initializes Firebase auth state change listener.
+ * Does not fire any rogue background popup requests or GIS origin_mismatch requests.
  */
 export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onTokenNeedRefresh?: (user: User) => void,
   onLoggedOut?: () => void
 ) => {
-  // Start Keep-Alive Background Heartbeat to prevent token from ever expiring
-  if (!keepAliveTimer && typeof window !== 'undefined') {
-    keepAliveTimer = setInterval(async () => {
-      const expiry = getTokenExpiryMs();
-      if (expiry && auth.currentUser) {
-        // If token expires within 10 minutes, silently refresh it in background
-        if (Date.now() > expiry - 600000) {
-          console.log('[AUTH] Proactive background token refresh triggered...');
-          const fresh = await refreshAccessTokenSilently();
-          if (fresh && onAuthSuccess) {
-            onAuthSuccess(auth.currentUser, fresh);
-          }
-        }
-      }
-    }, 5 * 60 * 1000); // Check every 5 minutes
-
-    // Also refresh on window focus / tab visibility change if nearing expiry
-    window.addEventListener('visibilitychange', async () => {
-      if (document.visibilityState === 'visible' && auth.currentUser) {
-        const expiry = getTokenExpiryMs();
-        if (expiry && Date.now() > expiry - 300000) {
-          const fresh = await refreshAccessTokenSilently();
-          if (fresh && onAuthSuccess) {
-            onAuthSuccess(auth.currentUser, fresh);
-          }
-        }
-      }
-    });
-  }
-
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
       if (user.email) {
@@ -285,12 +190,8 @@ export const initAuth = (
         cachedAccessToken = stored;
         if (onAuthSuccess) onAuthSuccess(user, stored);
       } else {
-        // Attempt silent refresh first
-        const silentlyRenewed = await refreshAccessTokenSilently();
-        if (silentlyRenewed) {
-          cachedAccessToken = silentlyRenewed;
-          if (onAuthSuccess) onAuthSuccess(user, silentlyRenewed);
-        } else if (onTokenNeedRefresh) {
+        // Token is not present or has expired, notify caller so UI can prompt when needed
+        if (onTokenNeedRefresh) {
           onTokenNeedRefresh(user);
         }
       }
@@ -304,7 +205,8 @@ export const initAuth = (
 
 /**
  * Interactive Google Sign-In with popup.
- * Automatically remembers email hint and stores credentials.
+ * Triggered explicitly by user clicks (e.g. login button or ReauthModal action button).
+ * Automatically uses Firebase authDomain (no origin_mismatch error).
  */
 export const googleSignIn = async (
   options: { forceConsent?: boolean; customEmail?: string } = {}
@@ -344,7 +246,6 @@ export const googleSignIn = async (
 
 /**
  * Retrieves the currently active Google OAuth access token.
- * Proactively attempts silent refresh if expired or missing.
  */
 export const getAccessToken = async (): Promise<string | null> => {
   if (cachedAccessToken) return cachedAccessToken;
@@ -353,24 +254,10 @@ export const getAccessToken = async (): Promise<string | null> => {
     cachedAccessToken = stored;
     return stored;
   }
-
-  // Try silent refresh if user is still signed in with Firebase
-  if (auth.currentUser) {
-    const silent = await refreshAccessTokenSilently();
-    if (silent) {
-      cachedAccessToken = silent;
-      return silent;
-    }
-  }
-
   return null;
 };
 
 export const logout = async () => {
-  if (keepAliveTimer) {
-    clearInterval(keepAliveTimer);
-    keepAliveTimer = null;
-  }
   await signOut(auth);
   cachedAccessToken = null;
   clearStoredAccessToken();

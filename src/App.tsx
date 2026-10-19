@@ -22,11 +22,11 @@ import {
   initAuth,
   googleSignIn,
   getAccessToken,
+  getStoredAccessToken,
   logout,
   isAuthError,
   clearAuthToken,
   validateToken,
-  refreshAccessTokenSilently,
 } from './services/auth';
 import {
   checkFileExistsInFolder,
@@ -164,51 +164,25 @@ export default function App() {
     [showToast]
   );
 
-  // Centralized Auto-Login Handler when token expires or invalid credentials occur
+  // Centralized Auth Handler when token expires or invalid credentials occur
   const refreshGoogleAuth = useCallback(
     async (reason?: string, onResumeAction?: (newToken: string) => void): Promise<string | null> => {
-      // ⚡ Step 1: Attempt completely silent background refresh via Google Identity Services
-      try {
-        console.log('[AUTO-LOGIN] Attempting silent OAuth token renewal...');
-        const silentToken = await refreshAccessTokenSilently();
-        if (silentToken) {
-          setToken(silentToken);
-          showToast('success', 'Sesi Google Diperbarui Otomatis', 'Kredensial Google berhasil diperbarui di latar belakang.');
-          if (onResumeAction) onResumeAction(silentToken);
-          return silentToken;
-        }
-      } catch (silentErr) {
-        console.warn('Silent token renewal could not complete:', silentErr);
+      // Step 1: Check if a valid stored token exists
+      const stored = getStoredAccessToken();
+      if (stored) {
+        setToken(stored);
+        if (onResumeAction) onResumeAction(stored);
+        return stored;
       }
 
-      // Step 2: Inform user and attempt popup or modal
-      showToast(
-        'info',
-        'Memperbarui Sesi Google...',
-        reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Menyambungkan kembali akun Google...'
+      // Step 2: Open Reauth Modal so user can sign in with 1-click user gesture (prevents popup blocker & origin_mismatch)
+      triggerAutoReauth(
+        reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Silakan klik tombol untuk masuk kembali.',
+        onResumeAction
       );
-
-      try {
-        const loginRes = await googleSignIn();
-        if (loginRes?.accessToken) {
-          setToken(loginRes.accessToken);
-          setUser(loginRes.user);
-          showToast('success', 'Sesi Berhasil Diperbarui', 'Akun Google berhasil terhubung kembali.');
-          if (onResumeAction) onResumeAction(loginRes.accessToken);
-          return loginRes.accessToken;
-        }
-      } catch (err: unknown) {
-        console.warn('Direct popup login was dismissed or blocked by browser:', err);
-        // Browser popup blocker intercepts async calls without direct user click.
-        // Immediately show the Reauth Modal so user can click to login with genuine gesture!
-        triggerAutoReauth(
-          reason || 'Kredensial OAuth tidak valid atau kedaluwarsa. Silakan klik tombol untuk masuk kembali.',
-          onResumeAction
-        );
-      }
       return null;
     },
-    [showToast, triggerAutoReauth]
+    [triggerAutoReauth]
   );
 
   // 1. Initialize Auth on startup with persistent user session
@@ -1027,14 +1001,7 @@ export default function App() {
     if (activeToken) {
       const isValid = await validateToken(activeToken);
       if (!isValid) {
-        // Attempt completely silent background renewal via GIS first!
-        const silentlyRenewed = await refreshAccessTokenSilently();
-        if (silentlyRenewed) {
-          activeToken = silentlyRenewed;
-          setToken(silentlyRenewed);
-        } else {
-          activeToken = null;
-        }
+        activeToken = await getAccessToken();
       }
     } else {
       activeToken = await getAccessToken();
